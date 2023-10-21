@@ -31,9 +31,9 @@ int parmake_h(graph* dependency_graph, char* val, vector* visited){
             return 0;
         }
     }   
+
     vector_destroy(neighbors);
                 
-
     rule_t* rule = graph_get_vertex_value(dependency_graph, val);
 
     vector* commands = rule->commands;
@@ -49,20 +49,22 @@ int parmake_h(graph* dependency_graph, char* val, vector* visited){
 int parmake(char *makefile, size_t num_threads, char **targets) {
 
     graph* dependency_graph = parser_parse_makefile(makefile, targets);
-
     if(dependency_graph == NULL) return 0;
     vector* vertices = graph_vertices(dependency_graph);
     if(vector_empty(vertices)) return 0;
 
-    char* head = vector_get(vertices, 0);
-
-    vector* visited = vector_create(NULL, NULL, NULL);
-    parmake_h(dependency_graph, head, visited);
+    vector* target_vertices = graph_neighbors(dependency_graph, "");
+    
+    VECTOR_FOR_EACH(target_vertices, vertice, {
+        vector* visited = vector_create(NULL, NULL, NULL);
+        parmake_h(dependency_graph, vertice, visited);
+        vector_destroy(visited);
+    });
 
     
+    vector_destroy(target_vertices);
     vector_destroy(vertices);
     graph_destroy(dependency_graph);
-    vector_destroy(visited);
 
     return 1;
 }
