@@ -3,8 +3,30 @@
 #include "parmake.h"
 #include "parser.h"
 #include <stdio.h>
+#include <sys/stat.h>
 
 
+time_t get_modification_time(char* filename){
+    struct stat file_stat;
+    
+    if (stat(filename, &file_stat) == 0) {
+        return file_stat.st_mtime; 
+    }
+    return -1;
+}
+
+int run_rule(graph* dependency_graph, char* val){
+    rule_t* rule = graph_get_vertex_value(dependency_graph, val);
+
+    vector* commands = rule->commands;
+
+    VECTOR_FOR_EACH(commands, command, {
+        int res = system(command);
+        if(res != 0) return 0;
+    });
+
+    return 1;
+}
 
 int parmake_h(graph* dependency_graph, char* val){
 
@@ -24,18 +46,36 @@ int parmake_h(graph* dependency_graph, char* val){
         }
     }   
 
+    int cur_file_modtime = (int)get_modification_time(val);
+    int newest_dep_modtime = -1;  
+
+    int retval = 0;
+
+    if(cur_file_modtime != -1){
+        VECTOR_FOR_EACH(neighbors, neighbor, {
+            int temp_modtime = (int)get_modification_time(neighbor);
+            if(temp_modtime > newest_dep_modtime){
+                newest_dep_modtime = temp_modtime;
+            }
+        });
+        if(newest_dep_modtime == -1){
+
+            retval = run_rule(dependency_graph, val);
+        }
+        else if(newest_dep_modtime > cur_file_modtime){  
+            retval = run_rule(dependency_graph, val);
+        }
+        else{
+            retval = 1;
+        }
+    }
+    else{
+        retval = run_rule(dependency_graph, val);
+    }
     vector_destroy(neighbors);
-                
-    rule_t* rule = graph_get_vertex_value(dependency_graph, val);
 
-    vector* commands = rule->commands;
+    return retval;
 
-    VECTOR_FOR_EACH(commands, command, {
-        int res = system(command);
-        if(res != 0) return 0;
-    });
-
-    return 1;
 }
 
 int hasCycle(graph* graph, char* dependency, vector* visited){
