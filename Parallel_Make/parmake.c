@@ -33,18 +33,15 @@ int parmake_h(graph* dependency_graph, char* val){
 
     vector* neighbors = graph_neighbors(dependency_graph, val);
 
-    void **_it = vector_begin(neighbors);
-    void **_iend = vector_end(neighbors);
-    _iend--;
-    for (; _it <= _iend; _iend--) {
-        char* val_n = *_iend;
-        int res = parmake_h(dependency_graph, val_n);
-        
+    VECTOR_FOR_EACH(neighbors, neighbor, {
+
+        int res = parmake_h(dependency_graph, neighbor);
         if(res == 0){
             vector_destroy(neighbors);
             return 0;
         }
-    }   
+    });
+     
 
     int cur_file_modtime = (int)get_modification_time(val);
     int newest_dep_modtime = -1;  
@@ -117,24 +114,18 @@ int parmake(char *makefile, size_t num_threads, char **targets) {
         } while (*targets != NULL);
     }
 
-    void **_it = vector_begin(target_vertices);
-    void **_iend = vector_end(target_vertices);
-    _iend--;
-    for (; _it <= _iend; _iend--) {
-        char* val_n = *_iend;
-
+    VECTOR_FOR_EACH(target_vertices, target_vertex,{
         vector* visited_vertices = vector_create(NULL, NULL, NULL);
-        int _hasCycle = hasCycle(dependency_graph, val_n, visited_vertices);
+        int _hasCycle = hasCycle(dependency_graph, target_vertex, visited_vertices);
 
         vector_destroy(visited_vertices);
         if(_hasCycle){
-            print_cycle_failure(val_n);
+            print_cycle_failure(target_vertex);
         }
         else{
-            parmake_h(dependency_graph, val_n);
+            parmake_h(dependency_graph, target_vertex);
         }
-        
-    }   
+    });
 
     
 
