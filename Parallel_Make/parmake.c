@@ -42,6 +42,7 @@ int parmake_h(graph* dependency_graph, char* val){
     });
 
     if(isDependencyFailed){
+        vector_destroy(neighbors);
         return -1;
     }
      
