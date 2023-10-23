@@ -8,32 +8,34 @@
 
 int parmake_h(graph* dependency_graph, char* val, vector* visited){
 
-
+    short hasCycle = 0;
     VECTOR_FOR_EACH(visited, temp, {
         if(temp == val) {
             print_cycle_failure(val);
-            return 0;
+            hasCycle = 1;
         }
+        
     });
 
-    vector_push_back(visited, val);
-    vector* neighbors = graph_neighbors(dependency_graph, val);
+    if(!hasCycle){
+        vector_push_back(visited, val);
+        vector* neighbors = graph_neighbors(dependency_graph, val);
 
-    void **_it = vector_begin(neighbors);
-    void **_iend = vector_end(neighbors);
-    _iend--;
-    for (; _it <= _iend; _iend--) {
-        char* val_n = *_iend;
-        int res = parmake_h(dependency_graph, val_n, visited);
-        
-        if(res == 0){
-            vector_destroy(neighbors);
-            return 0;
-        }
-    }   
+        void **_it = vector_begin(neighbors);
+        void **_iend = vector_end(neighbors);
+        _iend--;
+        for (; _it <= _iend; _iend--) {
+            char* val_n = *_iend;
+            int res = parmake_h(dependency_graph, val_n, visited);
+            
+            if(res == 0){
+                vector_destroy(neighbors);
+                return 0;
+            }
+        }   
+        vector_destroy(neighbors);
 
-    vector_destroy(neighbors);
-                
+    }    
     rule_t* rule = graph_get_vertex_value(dependency_graph, val);
 
     vector* commands = rule->commands;
