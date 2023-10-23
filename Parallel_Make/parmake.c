@@ -90,9 +90,11 @@ int hasCycle(graph* graph, char* dependency, vector* visited){
     VECTOR_FOR_EACH(neighbors, neighbor,{
         int res = hasCycle(graph, neighbor, visited);
         if(res == 1){
+            vector_destroy(neighbors);
             return 1;
         }
     });
+    vector_destroy(neighbors);
     return 0;
 }
 
@@ -104,19 +106,27 @@ int parmake(char *makefile, size_t num_threads, char **targets) {
     if(size == 0) return 0;
 
     vector* target_vertices = graph_neighbors(dependency_graph, "");
-    vector* visited_vertices;
-    VECTOR_FOR_EACH(target_vertices, vertex, {
-        visited_vertices = vector_create(NULL, NULL, NULL);
-        int _hasCycle = hasCycle(dependency_graph, vertex, visited_vertices);
+
+    void **_it = vector_begin(target_vertices);
+    void **_iend = vector_end(target_vertices);
+    _iend--;
+    for (; _it <= _iend; _iend--) {
+        char* val_n = *_iend;
+
+        vector* visited_vertices = vector_create(NULL, NULL, NULL);
+        int _hasCycle = hasCycle(dependency_graph, val_n, visited_vertices);
 
         vector_destroy(visited_vertices);
         if(_hasCycle){
-            print_cycle_failure(vertex);
+            print_cycle_failure(val_n);
         }
         else{
-            parmake_h(dependency_graph, vertex);
+            parmake_h(dependency_graph, val_n);
         }
-    });
+        
+    }   
+
+    
 
     
     vector_destroy(target_vertices);
