@@ -22,7 +22,7 @@ int run_rule(graph* dependency_graph, char* val){
 
     VECTOR_FOR_EACH(commands, command, {
         int res = system(command);
-        if(res != 0) return 0;
+        if(res != 0) return -1;
     });
 
     return 1;
@@ -36,9 +36,9 @@ int parmake_h(graph* dependency_graph, char* val){
     VECTOR_FOR_EACH(neighbors, neighbor, {
 
         int res = parmake_h(dependency_graph, neighbor);
-        if(res == 0){
+        if(res == -1){
             vector_destroy(neighbors);
-            return 0;
+            return -1;
         }
     });
      
@@ -92,6 +92,7 @@ int hasCycle(graph* graph, char* dependency, vector* visited){
         }
     });
     vector_destroy(neighbors);
+    vector_pop_back(visited);
     return 0;
 }
 
@@ -127,9 +128,6 @@ int parmake(char *makefile, size_t num_threads, char **targets) {
         }
     });
 
-    
-
-    
     vector_destroy(target_vertices);
     graph_destroy(dependency_graph);
 
