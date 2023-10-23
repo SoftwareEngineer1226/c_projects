@@ -1,0 +1,10 @@
+#example
+
+d: a c
+		echo D
+a: b
+		echo A
+b: a
+		echo B
+c:
+		echo C
