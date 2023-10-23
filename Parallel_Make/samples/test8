@@ -1,0 +1,39 @@
+# Targets and their dependencies
+all: target1 target2
+
+target1: dependency1 dependency2
+	echo "Building target1"
+	echo "Dummy command 1: Compiling target1"
+	echo "Dummy command 2: Linking target1"
+
+target2: dependency3 dependency1 dependency4
+	echo "Building target2"
+	echo "Dummy command 1: Compiling target2"
+	echo "Dummy command 2: Linking target2"
+
+dependency1:
+	echo "Building dependency1"
+	echo "Dummy command 1: Compiling dependency1"
+
+dependency2:
+	echo "Building dependency2"
+	echo "Dummy command 1: Compiling dependency2"
+
+dependency3:
+	echo "Building dependency3"
+	echo "Dummy command 1: Compiling dependency3"
+
+dependency4:
+	echo "Building dependency4"
+	echo "Dummy command 1: Compiling dependency4"
+
+# Additional targets and dependencies
+clean:
+	echo "Cleaning generated files"
+	rm -f target1 target2 dependency1 dependency2 dependency3 dependency4
+
+test: all
+	echo "Running tests"
+	echo "Dummy command: Testing the program"
+
+

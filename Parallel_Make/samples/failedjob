@@ -7,4 +7,4 @@ dep1: dep3
 dep2:
 		echo dep2
 dep3:
-		touch file-that-doesnt-exist
+		rm doesntexist
