@@ -1,0 +1,40 @@
+# Targets and their dependencies with intentional issues
+all: target1 target2 target3 target4
+
+target1: dependency1 dependency2 dependency3
+	echo "Building target1"
+
+target2: dependency4 dependency5 dependency6
+	echo "Building target2"
+
+target3: dependency7 dependency8
+	echo "Building target3"
+target4: target1 target3 target2 target_with_issues
+	echo "Building target4"
+dependency1: dependency2
+	echo "Building dependency1"
+
+dependency2: 
+	echo "Building dependency2"
+
+dependency4: dependency5 dependency6
+	echo "Building dependency4"
+
+dependency7: dependency8
+	echo "Building dependency7"
+
+cleann: clean
+	echo "This is a typo in the target name."
+
+target_with_issues: missing_file syntax_error
+	echo "Building target_with_issues"
+
+undefined_target:
+	echo "Building undefined_target"
+	echo "Dummy command 1: Compiling undefined_target"
+
+syntax_error:
+	echo "Building syntax_error"
+	echo "Intentional syntax error
+
+

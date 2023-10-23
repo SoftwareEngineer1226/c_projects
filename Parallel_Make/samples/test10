@@ -27,7 +27,7 @@ dependency4: dependency5
 	echo "Building dependency4"
 	echo "Dummy command 1: Compiling dependency4"
 
-dependency5: dependency4
+dependency5:
 	echo "Building dependency5"
 	echo "Dummy command 1: Compiling dependency5"
 
