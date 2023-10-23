@@ -1,0 +1,10 @@
+parent: a  b
+	echo parent
+a: c d
+	echo a
+b: d
+	echo b
+d:
+	fails
+c:
+	echo C
