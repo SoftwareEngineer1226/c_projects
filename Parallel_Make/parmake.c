@@ -32,20 +32,22 @@ int parmake_h(graph* dependency_graph, char* val){
 
 
     vector* neighbors = graph_neighbors(dependency_graph, val);
-
+    int isDependencyFailed = 0; 
     VECTOR_FOR_EACH(neighbors, neighbor, {
 
         int res = parmake_h(dependency_graph, neighbor);
         if(res == -1){
-            vector_destroy(neighbors);
-            return -1;
+            isDependencyFailed = 1;
         }
     });
+
+    if(isDependencyFailed){
+        return -1;
+    }
      
 
     int cur_file_modtime = (int)get_modification_time(val);
     int newest_dep_modtime = -1;  
-
     int retval = 0;
 
     if(cur_file_modtime != -1){
