@@ -1,0 +1,12 @@
+#example
+
+parent: dep1 dep2
+		echo parent
+dep1: dep3
+		echo dep1-start
+		sleep 2
+		echo dep1-end
+dep2:
+		echo dep2
+dep3:
+		echo dep3

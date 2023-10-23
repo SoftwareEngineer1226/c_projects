@@ -1,0 +1,5 @@
+a: b
+	echo "this should not be shown because of the dependency failure"
+b:
+	echo "this one should fail with cat command"
+	cat asdf

@@ -1,0 +1,11 @@
+all: a c
+	echo all
+
+a: b
+	echo A
+
+b: a
+	echo B
+
+c:
+	echo This should be the only line that prints out
