@@ -105,7 +105,17 @@ int parmake(char *makefile, size_t num_threads, char **targets) {
     int size = graph_vertex_count(dependency_graph);
     if(size == 0) return 0;
 
-    vector* target_vertices = graph_neighbors(dependency_graph, "");
+    vector* target_vertices;
+
+    if(*targets == NULL) 
+        target_vertices = graph_neighbors(dependency_graph, "");
+    else {
+        target_vertices = vector_create(NULL, NULL, NULL);
+        do
+        {
+            vector_push_back(target_vertices, *targets++);
+        } while (*targets != NULL);
+    }
 
     void **_it = vector_begin(target_vertices);
     void **_iend = vector_end(target_vertices);
