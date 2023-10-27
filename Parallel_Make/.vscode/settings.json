@@ -1,0 +1,22 @@
+{
+    "makefile.launchConfigurations": [
+        {
+            "cwd": "/home/levrek/cprojects/Parallel_Make",
+            "binaryPath": "/home/levrek/cprojects/Parallel_Make/parmake",
+            "binaryArgs": []
+        }
+    ],
+    "files.associations": {
+        "array": "c",
+        "hash_map": "c",
+        "hash_set": "c",
+        "bitset": "c",
+        "string_view": "c",
+        "initializer_list": "c",
+        "utility": "c",
+        "valarray": "c",
+        "unordered_map": "c",
+        "unordered_set": "c"
+    },
+    "C_Cpp.errorSquiggles": "disabled"
+}
