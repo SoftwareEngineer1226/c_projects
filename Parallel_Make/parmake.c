@@ -6,10 +6,14 @@
 #include <stdio.h>
 #include <sys/stat.h>
 #include <pthread.h>
+#include <semaphore.h>
 
 
 pthread_mutex_t mutex;
 graph* dependency_graph;
+queue* _queue;
+
+
 
 time_t get_modification_time(char* filename){
     struct stat file_stat;
@@ -34,81 +38,120 @@ int run_rule(graph* dependency_graph, rule_t* rule){
 
 
 void *thread_func(void* arg){
-
     queue* q = (queue*) arg;    
+    char* target_name;
 
-    
-    char* target_name = queue_pull(q);
-    if(target_name == NULL){
-        //TODO: force all the threads to terminate
-    }
+    vector* deps = NULL;
 
-    pthread_mutex_lock(&mutex);
-    rule_t* this_target_rule = (rule_t*)graph_get_vertex_value(dependency_graph, target_name);
-    vector* deps = graph_neighbors(dependency_graph, target_name);
-    pthread_mutex_unlock(&mutex);
-    if(this_target_rule->state == -1){
-        vector_destroy(deps);
-        return NULL;
-    }
 
-    rule_t* dep_rule;
-    
-    short pushed_back_to_q = 0;
-    VECTOR_FOR_EACH(deps, dep, {
+    while((target_name = queue_pull(q))){
+        if(deps != NULL)
+            vector_destroy(deps);
+        if(target_name == NULL) break;
+  
         pthread_mutex_lock(&mutex);
-
-        dep_rule = (rule_t*)graph_get_vertex_value(dependency_graph, dep);
+        rule_t* this_target_rule = (rule_t*)graph_get_vertex_value(dependency_graph, target_name);
+        deps = graph_neighbors(dependency_graph, target_name);
         pthread_mutex_unlock(&mutex);
 
-        if(dep_rule->state == 0){
-            if(pushed_back_to_q == 0){
-                pushed_back_to_q = 1;
+        if(this_target_rule->state == -1 || this_target_rule->state == 1){
+
+            if(this_target_rule->data != NULL){
+
+                pthread_mutex_t* this_target_mutex = (pthread_mutex_t*)this_target_rule->data;
+                pthread_mutex_unlock(this_target_mutex);
             }
-            //this target(this_target_rule) will be satisfied before the dependencies are satisfied
-            //how can we wait until the dependencies are satisfied
-            queue_push(q, dep);
+
+            continue;
         }
-        else if(dep_rule->state == -1){
-            this_target_rule->state = -1;
-        }
-
-    });
+        
 
 
-    if(pushed_back_to_q){
-        queue_push(q, target_name);
-        vector_destroy(deps);
-        return NULL;
-    }
-    
-    int cur_file_modtime = (int)get_modification_time(target_name);
-    int newest_dep_modtime = -1;  
+        rule_t* dep_rule;
 
-    if(cur_file_modtime != -1){
+        short push_back_to_q = 0;
+        short failed = 0;
         VECTOR_FOR_EACH(deps, dep, {
-            int temp_modtime = (int)get_modification_time(dep);
-            if(temp_modtime > newest_dep_modtime){
-                newest_dep_modtime = temp_modtime;
-            }
-        });
-        if(newest_dep_modtime == -1){
+            pthread_mutex_lock(&mutex);
 
-            this_target_rule->state = run_rule(dependency_graph, this_target_rule);
+            dep_rule = (rule_t*)graph_get_vertex_value(dependency_graph, dep);
+            pthread_mutex_unlock(&mutex);
+            if(dep_rule->state == 2){
+                if(push_back_to_q == 0){
+                    queue_push(q, target_name);
+
+                    push_back_to_q = 1;
+                }
+            }
+            if(dep_rule->state == 0){
+                dep_rule->state = 2;
+
+                if(push_back_to_q == 0){
+                    queue_push(q, target_name);
+
+                    push_back_to_q = 1;
+                }
+                queue_push(q, dep);
+            }
+            else if(dep_rule->state == -1){
+                this_target_rule->state = -1;
+                failed = 1;
+            }
+
+        });
+
+        if(failed){
+            if(((pthread_mutex_t*)this_target_rule->data) != NULL){
+
+                pthread_mutex_t* this_target_mutex = (pthread_mutex_t*)this_target_rule->data;
+                pthread_mutex_unlock(this_target_mutex);
+            }
+            continue;
+
+        } 
+        if(push_back_to_q){
+
+            continue;
         }
-        else if(newest_dep_modtime > cur_file_modtime){  
-            this_target_rule->state = run_rule(dependency_graph, this_target_rule);
+        
+        
+
+        int cur_file_modtime = (int)get_modification_time(target_name);
+        int newest_dep_modtime = -1;  
+
+        if(cur_file_modtime != -1){
+            VECTOR_FOR_EACH(deps, dep, {
+                int temp_modtime = (int)get_modification_time(dep);
+                if(temp_modtime > newest_dep_modtime){
+                    newest_dep_modtime = temp_modtime;
+                }
+            });
+            if(newest_dep_modtime == -1){
+
+                this_target_rule->state = run_rule(dependency_graph, this_target_rule);
+            }
+            else if(newest_dep_modtime > cur_file_modtime){  
+                this_target_rule->state = run_rule(dependency_graph, this_target_rule);
+
+            }
+            else{
+                this_target_rule->state = 1;
+            }
         }
         else{
-            this_target_rule->state = 1;
+            this_target_rule->state = run_rule(dependency_graph, this_target_rule);
         }
-    }
-    else{
-        this_target_rule->state = run_rule(dependency_graph, this_target_rule);
-    }
-    
-    vector_destroy(deps);
 
+        if(((pthread_mutex_t*)this_target_rule->data) != NULL){
+
+            pthread_mutex_t* this_target_mutex = (pthread_mutex_t*)this_target_rule->data;
+            pthread_mutex_unlock(this_target_mutex);
+        }
+        
+    }    
+    if(deps != NULL){
+        vector_destroy(deps);
+    }
     return NULL;
 }
 
@@ -192,9 +235,10 @@ int hasCycle(graph* graph, char* dependency, vector* visited){
 int parmake(char *makefile, size_t num_threads, char **targets) {
     
     pthread_t THREADS[num_threads];
-    queue* target_q = queue_create(0);
+    _queue = queue_create(0);
 
     dependency_graph = parser_parse_makefile(makefile, targets);
+
     if(dependency_graph == NULL) return 0;
     int size = graph_vertex_count(dependency_graph);
     if(size == 0) return 0;
@@ -212,6 +256,13 @@ int parmake(char *makefile, size_t num_threads, char **targets) {
     }
     vector* visited_vertices = vector_create(NULL, NULL, NULL);
 
+    int target_count = (int)vector_size(target_vertices);
+    pthread_mutex_t target_mutexes[target_count];
+    for(int i=0; i< target_count;i++){
+        pthread_mutex_init(&target_mutexes[i], NULL);
+    }
+    int i = 0;
+    rule_t* deprule;
     VECTOR_FOR_EACH(target_vertices, target_vertex,{
         int _hasCycle = hasCycle(dependency_graph, target_vertex, visited_vertices);
 
@@ -219,7 +270,10 @@ int parmake(char *makefile, size_t num_threads, char **targets) {
             print_cycle_failure(target_vertex);
         }
         else{
-            queue_push(target_q, target_vertex);
+            deprule = (rule_t*)graph_get_vertex_value(dependency_graph, target_vertex);
+            pthread_mutex_lock(&target_mutexes[i]);
+            deprule->data = (void*)&target_mutexes[i++];
+            queue_push(_queue, target_vertex);
         }
     });
 
@@ -229,13 +283,23 @@ int parmake(char *makefile, size_t num_threads, char **targets) {
     pthread_mutex_init(&mutex, NULL);
     
     for(int i=0;i<(int)num_threads;i++){
-        pthread_create(&THREADS[i], NULL, thread_func, target_q);
+        pthread_create(&THREADS[i], NULL, thread_func, _queue);
     }
+    
+    for(int i = 0; i< target_count;i++){
+
+        pthread_mutex_lock(&target_mutexes[i]);
+
+    }
+    for(int i = 0; i<(int)num_threads;i++){
+        queue_push(_queue, NULL);
+    }
+
     for (int i = 0; i < (int)num_threads; i++) {
         pthread_join(THREADS[i], NULL);
     }    
     
-    queue_destroy(target_q);
+    queue_destroy(_queue);
     vector_destroy(target_vertices);
     graph_destroy(dependency_graph);
 

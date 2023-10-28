@@ -16,7 +16,9 @@
         "utility": "c",
         "valarray": "c",
         "unordered_map": "c",
-        "unordered_set": "c"
+        "unordered_set": "c",
+        "condition_variable": "c",
+        "string": "c"
     },
     "C_Cpp.errorSquiggles": "disabled"
 }
