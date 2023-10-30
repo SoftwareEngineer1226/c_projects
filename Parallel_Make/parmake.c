@@ -49,7 +49,7 @@ void *thread_func(void* arg){
         if(deps != NULL)
             vector_destroy(deps);
         if(target_name == NULL) break;
-        
+
         pthread_mutex_lock(&mutex);
         rule_t* this_target_rule = (rule_t*)graph_get_vertex_value(dependency_graph, target_name);
         deps = graph_neighbors(dependency_graph, target_name);
@@ -310,6 +310,8 @@ int parmake(char *makefile, size_t num_threads, char **targets) {
     
     queue_destroy(_queue);
     vector_destroy(target_vertices);
+    vector_destroy(pending_targets);
+
     graph_destroy(dependency_graph);
 
     return 1;
