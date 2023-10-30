@@ -1,0 +1,5 @@
+a: b
+	echo a
+b:
+	sleep 2
+	echo b
