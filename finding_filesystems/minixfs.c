@@ -60,15 +60,19 @@ int minixfs_chown(file_system *fs, char *path, uid_t owner, gid_t group) {
 
     return 0;
 }
+char* get_offset_char(file_system*fs, inode* _inode, off_t offset){
+    int index_of_db = offset/(16 * KILOBYTE);
+    int db_offset = offset%(16 * KILOBYTE);
+    data_block *db = &(fs->data_root[_inode->direct[index_of_db]]);
+    return &(db->data[db_offset]);
+}
 
 inode *minixfs_create_inode_for_path(file_system *fs, const char *path) {
     inode* i_node = get_inode(fs, path);
     if(i_node != NULL){
         return NULL;
     }
-    if(!valid_filename(path)){
-        return NULL;
-    }
+    
     
     int len = (int)strlen(path);
     const char *endptr = path + len;
@@ -76,27 +80,38 @@ inode *minixfs_create_inode_for_path(file_system *fs, const char *path) {
         endptr--;
     }
 
-    clock_gettime(CLOCK_REALTIME, &(i_node->atim));
-    clock_gettime(CLOCK_REALTIME, &(i_node->atim));
 
 
     char* filename = (char*)(endptr + 1);
+    if(!valid_filename(filename)){
+        return NULL;
+    }
     char *parent_path = malloc(endptr - path + strlen("/") + 1);
+
+
     strncpy(parent_path, path, endptr - path + 1);
     parent_path[endptr - path + 1] = '\0';
-    inode *parent_node = get_inode(fs, parent_path);
 
-    inode* ret_node = (inode*) malloc(sizeof(inode));
+
+    inode *parent_node = get_inode(fs, parent_path);
+    if(parent_node == NULL){
+        free(parent_path);
+
+        return NULL;
+    }
+
+    inode_number ret_node_num = first_unused_inode(fs);
+    inode* ret_node = &(fs->inode_root[ret_node_num]);
     init_inode(parent_node, ret_node);
+    char* block = get_offset_char(fs, parent_node, parent_node->size);
 
     minixfs_dirent dirent;
-    dirent.name = filename;
-    size_t inode_number = ret_node - fs->inode_root;
-    dirent.inode_num = inode_number;
-
-    make_string_from_dirent(fs->data_root[ret_node->direct[0]].data, dirent);
-
-
+    dirent.name = (char*)filename;
+    dirent.inode_num = ret_node_num;
+    
+    make_string_from_dirent(block, dirent);
+    parent_node->size+= FILE_NAME_ENTRY;
+    free(parent_path);
     return ret_node;
 }
 
@@ -105,13 +120,7 @@ size_t get_used_datablock_count(file_system* fs){
     size_t used_datablocks = 0;
 
     for(int i=0;i<(int)fs->meta->inode_count;i++){
-        inode* _inode = (fs->inode_root + (i*sizeof(inode)));
-        for(int j = 0; j<NUM_DIRECT_BLOCKS;j++){
-            if(_inode->direct[j] > 0){
-                used_datablocks++;
-            }
-        }
-        if(_inode->indirect > 0){
+        if(get_data_used(fs, i) == 1){
             used_datablocks++;
         }
     }
@@ -133,7 +142,14 @@ ssize_t minixfs_virtual_read(file_system *fs, const char *path, void *buf,
 
 ssize_t minixfs_write(file_system *fs, const char *path, const void *buf,
                       size_t count, off_t *off) {
-    minixfs_create_inode_for_path(fs, path);
+    
+    inode* inode = minixfs_create_inode_for_path(fs, path);
+    if(inode == NULL){
+        return -1;
+    }
+
+
+
     return 0;
 }
 
@@ -162,7 +178,8 @@ ssize_t minixfs_read(file_system *fs, const char *path, void *buf, size_t count,
         return 0;
     }
 
-    size_t bytes_remain = i_node->size;
+    
+    size_t bytes_remain = count;
 
     buf =  (void *)calloc(i_node->size, sizeof(char));
     for (int i = 0; i < NUM_DIRECT_BLOCKS; i++) {
