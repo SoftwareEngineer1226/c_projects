@@ -143,14 +143,69 @@ ssize_t minixfs_virtual_read(file_system *fs, const char *path, void *buf,
 ssize_t minixfs_write(file_system *fs, const char *path, const void *buf,
                       size_t count, off_t *off) {
     
-    inode* inode = minixfs_create_inode_for_path(fs, path);
-    if(inode == NULL){
+
+
+    inode* _inode = get_inode(fs, path);
+
+    if(_inode == NULL){
+        errno = ENOENT;
+        return -1;
+    }
+    
+    size_t block_size = KILOBYTE * 16;
+    size_t max_file_size = (NUM_DIRECT_BLOCKS + NUM_DIRECT_BLOCKS) * block_size;
+
+    if (*off + count > max_file_size) {
+        errno = ENOSPC;
         return -1;
     }
 
+    
+    size_t block_index = *off / block_size;
+    size_t block_offset = *off % block_size;
 
+    size_t bytes_to_write = count;
+    size_t bytes_to_write_per_time = bytes_to_write;
+    size_t bytes_written = 0;
 
-    return 0;
+    if (block_offset + count > block_size) {
+        bytes_to_write_per_time = block_size - block_offset;
+    }
+
+    while(bytes_to_write_per_time > 0){
+        
+
+        block_index = *off / block_size;
+        block_offset = *off % block_size;
+
+        if(_inode->direct[block_index] == UNASSIGNED_NODE){
+            add_data_block_to_inode(fs, _inode);
+        }
+
+        data_block *db = &fs->data_root[_inode->direct[block_index]];
+        memcpy(db->data + *off, buf, bytes_to_write_per_time);
+        
+
+        *off += bytes_to_write_per_time;
+        count -= bytes_to_write_per_time;
+        bytes_written += bytes_to_write_per_time;
+        bytes_to_write_per_time = count;
+
+        if (block_offset + count > block_size) {
+            bytes_to_write_per_time = block_size - block_offset;
+        }
+
+    }
+    
+
+    if (*off + count > _inode->size) {
+        _inode->size = *off + count;
+        if(_inode->size > max_file_size){
+            _inode->size = max_file_size;
+        }
+    }
+    
+    return bytes_written;
 }
 
 void print_buffer(void* buf, size_t size){
@@ -181,7 +236,7 @@ ssize_t minixfs_read(file_system *fs, const char *path, void *buf, size_t count,
     
     size_t bytes_remain = count;
 
-    buf =  (void *)calloc(i_node->size, sizeof(char));
+    
     for (int i = 0; i < NUM_DIRECT_BLOCKS; i++) {
         data_block_number block_number = i_node->direct[i];
         if (block_number > 0) {
