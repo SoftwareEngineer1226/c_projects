@@ -204,24 +204,26 @@ ssize_t minixfs_write(file_system *fs, const char *path, const void *buf,
         
         block_index = *off / block_size;
         block_offset = *off % block_size;
-         if (block_offset + count > block_size) {
+        if (block_offset + bytes_left > block_size) {
             bytes_to_write_per_time = block_size - block_offset;
         }
         data_block *db = NULL;
         if(block_index >= NUM_DIRECT_BLOCKS){
+
             block_index -= NUM_DIRECT_BLOCKS;
             if(_inode->indirect == UNASSIGNED_NODE){
-                int res = add_single_indirect_block(fs, _inode);
-                if(res == -1){
+                inode_number res = add_single_indirect_block(fs, _inode);
+                if(res == UNASSIGNED_NODE){
                     errno = ENOSPC;
                     return -1;
                 }
             }
+
             data_block* tempdb = get_nth_indirect_block(fs, _inode, block_index);
 
             if(tempdb == NULL){
                 data_block_number dbnum_tmp = add_data_block_to_indirect_block(fs, (data_block_number*)fs->data_root[_inode->indirect].data);
-                if(dbnum_tmp == -1){
+                if(dbnum_tmp == UNASSIGNED_NODE){
                     errno = ENOSPC;
                     return -1;
                 }
@@ -233,6 +235,7 @@ ssize_t minixfs_write(file_system *fs, const char *path, const void *buf,
 
         }
         else{
+
             if(_inode->direct[block_index] == UNASSIGNED_NODE){
                 data_block_number dbnum_tmp = add_data_block_to_inode(fs, _inode);
                 if(dbnum_tmp == -1){
@@ -243,19 +246,17 @@ ssize_t minixfs_write(file_system *fs, const char *path, const void *buf,
             }
             else{
                 db = &fs->data_root[_inode->direct[block_index]];
-
+                
 
             }
         }
-
-        
-        memcpy(db->data + block_offset, buf + *off, bytes_to_write_per_time);
+        memcpy(db->data + block_offset, buf + bytes_written, bytes_to_write_per_time);
 
 
         *off += bytes_to_write_per_time;
         bytes_left -= bytes_to_write_per_time;
         bytes_written += bytes_to_write_per_time;
-        bytes_to_write_per_time = count;
+        bytes_to_write_per_time = bytes_left;
 
     }
 
@@ -314,7 +315,6 @@ ssize_t minixfs_read(file_system *fs, const char *path, void *buf, size_t count,
         if(data_size > bytes_remain){
             data_size = bytes_remain;
         }
-        
         memcpy(buf + bytes_read, db->data + block_offset, data_size);
         *off += data_size;
         bytes_remain -= data_size;
