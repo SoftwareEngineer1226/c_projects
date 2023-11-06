@@ -211,12 +211,21 @@ ssize_t minixfs_write(file_system *fs, const char *path, const void *buf,
         if(block_index >= NUM_DIRECT_BLOCKS){
             block_index -= NUM_DIRECT_BLOCKS;
             if(_inode->indirect == UNASSIGNED_NODE){
-                add_single_indirect_block(fs, _inode);
+                int res = add_single_indirect_block(fs, _inode);
+                if(res == -1){
+                    errno = ENOSPC;
+                    return -1;
+                }
             }
             data_block* tempdb = get_nth_indirect_block(fs, _inode, block_index);
 
             if(tempdb == NULL){
-                db = &fs->data_root[add_data_block_to_indirect_block(fs, (data_block_number*)fs->data_root[_inode->indirect].data)];
+                data_block_number dbnum_tmp = add_data_block_to_indirect_block(fs, (data_block_number*)fs->data_root[_inode->indirect].data);
+                if(dbnum_tmp == -1){
+                    errno = ENOSPC;
+                    return -1;
+                }
+                db = &fs->data_root[dbnum_tmp];
             }
             else{
                 db = tempdb;
@@ -225,7 +234,12 @@ ssize_t minixfs_write(file_system *fs, const char *path, const void *buf,
         }
         else{
             if(_inode->direct[block_index] == UNASSIGNED_NODE){
-                db = &fs->data_root[add_data_block_to_inode(fs, _inode)];
+                data_block_number dbnum_tmp = add_data_block_to_inode(fs, _inode);
+                if(dbnum_tmp == -1){
+                    errno = ENOSPC;
+                    return -1;
+                }
+                db = &fs->data_root[dbnum_tmp];
             }
             else{
                 db = &fs->data_root[_inode->direct[block_index]];
@@ -244,10 +258,8 @@ ssize_t minixfs_write(file_system *fs, const char *path, const void *buf,
         bytes_to_write_per_time = count;
 
     }
-    
 
-    
-    
+
     return bytes_written;
 }
 
