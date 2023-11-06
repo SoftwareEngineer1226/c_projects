@@ -139,12 +139,20 @@ ssize_t minixfs_virtual_read(file_system *fs, const char *path, void *buf,
     errno = ENOENT;
     return -1;
 }
+data_block* get_nth_indirect_block(file_system* fs, inode* _inode, int n){
+
+    data_block_number indirect_block_number = _inode->indirect;
+    data_block indirect_block = fs->data_root[indirect_block_number];
+    data_block_number* ind_block_nums = (data_block_number*) indirect_block.data;
+    if(ind_block_nums[n] == UNASSIGNED_NODE) return NULL;
+    return &(fs->data_root[ind_block_nums[n]]);
+    
+}
 
 ssize_t minixfs_write(file_system *fs, const char *path, const void *buf,
                       size_t count, off_t *off) {
     
-
-
+    
     inode* _inode = get_inode(fs, path);
 
     if(_inode == NULL){
@@ -164,46 +172,66 @@ ssize_t minixfs_write(file_system *fs, const char *path, const void *buf,
     size_t block_index = *off / block_size;
     size_t block_offset = *off % block_size;
 
-    size_t bytes_to_write = count;
-    size_t bytes_to_write_per_time = bytes_to_write;
+    long bytes_left = count;
+    size_t bytes_to_write_per_time = bytes_left;
     size_t bytes_written = 0;
 
     if (block_offset + count > block_size) {
         bytes_to_write_per_time = block_size - block_offset;
     }
-
-    while(bytes_to_write_per_time > 0){
-        
-
-        block_index = *off / block_size;
-        block_offset = *off % block_size;
-
-        if(_inode->direct[block_index] == UNASSIGNED_NODE){
-            add_data_block_to_inode(fs, _inode);
-        }
-
-        data_block *db = &fs->data_root[_inode->direct[block_index]];
-        memcpy(db->data + *off, buf, bytes_to_write_per_time);
-        
-
-        *off += bytes_to_write_per_time;
-        count -= bytes_to_write_per_time;
-        bytes_written += bytes_to_write_per_time;
-        bytes_to_write_per_time = count;
-
-        if (block_offset + count > block_size) {
-            bytes_to_write_per_time = block_size - block_offset;
-        }
-
-    }
-    
-
     if (*off + count > _inode->size) {
         _inode->size = *off + count;
         if(_inode->size > max_file_size){
             _inode->size = max_file_size;
         }
     }
+    while(bytes_left > 0){
+        
+        block_index = *off / block_size;
+        block_offset = *off % block_size;
+         if (block_offset + count > block_size) {
+            bytes_to_write_per_time = block_size - block_offset;
+        }
+        data_block *db = NULL;
+        if(block_index >= NUM_DIRECT_BLOCKS){
+            block_index -= NUM_DIRECT_BLOCKS;
+            if(_inode->indirect == UNASSIGNED_NODE){
+                add_single_indirect_block(fs, _inode);
+            }
+            data_block* tempdb = get_nth_indirect_block(fs, _inode, block_index);
+
+            if(tempdb == NULL){
+                db = &fs->data_root[add_data_block_to_indirect_block(fs, (data_block_number*)fs->data_root[_inode->indirect].data)];
+            }
+            else{
+                db = tempdb;
+            }
+
+        }
+        else{
+            if(_inode->direct[block_index] == UNASSIGNED_NODE){
+                db = &fs->data_root[add_data_block_to_inode(fs, _inode)];
+            }
+            else{
+                db = &fs->data_root[_inode->direct[block_index]];
+
+
+            }
+        }
+
+        
+        memcpy(db->data + block_offset, buf + *off, bytes_to_write_per_time);
+
+
+        *off += bytes_to_write_per_time;
+        bytes_left -= bytes_to_write_per_time;
+        bytes_written += bytes_to_write_per_time;
+        bytes_to_write_per_time = count;
+
+    }
+    
+
+    
     
     return bytes_written;
 }
@@ -221,56 +249,62 @@ ssize_t minixfs_read(file_system *fs, const char *path, void *buf, size_t count,
     if (virtual_path)
         return minixfs_virtual_read(fs, virtual_path, buf, count, off);
     
-    inode* i_node = get_inode(fs, path);
-    if(i_node == NULL){
+    inode* _inode = get_inode(fs, path);
+    if(_inode == NULL){
         errno = ENOENT;
         return -1;
     }
 
-    clock_gettime(CLOCK_REALTIME, &(i_node->atim));
+    if(count < _inode->size){
+        count = _inode->size;
+        buf = (void*)calloc(count, 1);
+    }
+    clock_gettime(CLOCK_REALTIME, &(_inode->atim));
 
-    if (*off >= (long)i_node->size) {
+    if (*off >= (long)_inode->size) {
         return 0;
     }
 
+    size_t block_size = KILOBYTE * 16;
     
     size_t bytes_remain = count;
+    if (*off + bytes_remain > _inode->size) {
+        bytes_remain = _inode->size - *off;
+    }
 
+    size_t block_index = *off / block_size;
+    size_t block_offset = *off % block_size;
+    size_t bytes_read = 0;
     
-    for (int i = 0; i < NUM_DIRECT_BLOCKS; i++) {
-        data_block_number block_number = i_node->direct[i];
-        if (block_number > 0) {
-            data_block data_block = fs->data_root[block_number];
-            size_t data_size = sizeof(data_block.data);
-            if(data_size > bytes_remain){
-                data_size = bytes_remain;
-            }
-            memcpy(buf + *off, data_block.data, sizeof(data_block.data));
-            
-            *off += data_size;
-            bytes_remain -= data_size;
-            if(bytes_remain == 0)break;
+    while (bytes_remain > 0) {
+
+
+        block_index = *off / block_size;
+        block_offset = *off % block_size;
+        data_block *db = NULL;
+
+
+        if(block_index >= NUM_DIRECT_BLOCKS){
+            block_index -= NUM_DIRECT_BLOCKS;
+            db = get_nth_indirect_block(fs, _inode, block_index);
         }
+        else{
+            db = &fs->data_root[_inode->direct[block_index]];
+        }        
+        size_t data_size = 16 * KILOBYTE - block_offset;
+        if(data_size > bytes_remain){
+            data_size = bytes_remain;
+        }
+        
+        memcpy(buf + bytes_read, db->data + block_offset, data_size);
+        *off += data_size;
+        bytes_remain -= data_size;
+        bytes_read += data_size;
+        
+        if(bytes_remain == 0) break;
+        
     }
 
-    data_block_number indirect_block_number = i_node->indirect;
-    data_block indirect_block = fs->data_root[indirect_block_number];
-
-    for (u_long i = 0; i < NUM_INDIRECT_BLOCKS; i++) {
-        data_block_number block_number = indirect_block.data[i];
-        if (block_number > 0) {
-            data_block data_block = fs->data_root[block_number];
-            size_t data_size = sizeof(data_block.data);
-            if(data_size > bytes_remain){
-                data_size = bytes_remain;
-            }
-            memcpy(buf + *off, data_block.data, data_size);
-            *off += data_size;
-            bytes_remain -= data_size;
-            if(bytes_remain == 0)break;
-
-        }
-    }
-    print_buffer(buf, i_node->size);
+    print_buffer(buf, _inode->size);
     return 0;  
 }
