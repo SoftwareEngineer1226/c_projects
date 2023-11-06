@@ -143,8 +143,8 @@ ssize_t minixfs_virtual_read(file_system *fs, const char *path, void *buf,
             if(line == 2) break;
         }
         size -= *off;
-
         memcpy(buf, string_to_print + *off, size);
+        *off += size;
         return size;
     }
 
