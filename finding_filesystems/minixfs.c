@@ -178,6 +178,8 @@ ssize_t minixfs_write(file_system *fs, const char *path, const void *buf,
         errno = ENOSPC;
         return -1;
     }
+    clock_gettime(CLOCK_REALTIME, &(_inode->atim));
+    clock_gettime(CLOCK_REALTIME, &(_inode->mtim));
 
     
     size_t block_index = *off / block_size;
@@ -196,6 +198,8 @@ ssize_t minixfs_write(file_system *fs, const char *path, const void *buf,
             _inode->size = max_file_size;
         }
     }
+
+
     while(bytes_left > 0){
         
         block_index = *off / block_size;
