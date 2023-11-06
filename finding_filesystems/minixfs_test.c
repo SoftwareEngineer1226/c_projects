@@ -10,16 +10,16 @@ int main() {
 
 
     //off_t off = 0;
-/*
+    /*
     inode* inod = minixfs_create_inode_for_path(fs, "/dog2.png");
     if(inod == NULL){
         printf("Inode creation is failed.");
         //return -1;
     }
-*/
+    */
     
+    long off = 0;
 
-    off_t off = 0;
 
     char *str = "Hello World!";
 
@@ -29,25 +29,29 @@ int main() {
 
 
 
-    fseek(file, 0, SEEK_END); // Seek to the end of the file
-    long file_size = ftell(file); // Get the current file position
-    rewind(file); // Reset the file position to the beginning
-
-    size_t buf_size = KILOBYTE;
-
-
-    char buffer[buf_size];
+    fseek(file, 0, SEEK_END);
+    long file_size = ftell(file);
+    rewind(file);
     off = 0;
-    while(off < file_size){
-        long elements_read = fread(buffer, 1, buf_size, file);
-        if((long)off + elements_read> file_size){
-            elements_read = file_size - off;
+    size_t buf_size = 512;
+    char buffer[buf_size];
+
+    while (off < file_size) {
+        size_t elements_to_read = (size_t)((file_size - off < (long)buf_size) ? file_size - off : buf_size);
+        size_t elements_read = fread(buffer, 1, elements_to_read, file);
+        if (elements_read != elements_to_read) {
+            perror("Error reading from the input file");
+            fclose(file);
+            return 1;
         }
 
-        minixfs_write(fs, "/dog9.png", buffer, elements_read, &off);
-        off += elements_read;
+        if (minixfs_write(fs, "/dog16.png", buffer, elements_read, &off) < 0) {
+            perror("Error writing to minixfs");
+            fclose(file);
+            return 1;
+        }
+        printf("off : %zu\n", off);
     }
-    
     fclose(file);
 
     close_fs(&fs);
