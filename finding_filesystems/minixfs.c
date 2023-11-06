@@ -39,6 +39,7 @@ int minixfs_chmod(file_system *fs, char *path, int new_permissions) {
         errno = ENOENT;
         return -1;
     }
+    clock_gettime(CLOCK_REALTIME, &(i_node->ctim));
 
     int mask = (1 << 2) - 1;
     i_node->mode = (new_permissions << 2) | (i_node->mode & mask);
@@ -51,6 +52,8 @@ int minixfs_chown(file_system *fs, char *path, uid_t owner, gid_t group) {
         errno = ENOENT;
         return -1;
     }
+    clock_gettime(CLOCK_REALTIME, &(i_node->ctim));
+
     if(owner != (u_int)-1){
         i_node->uid = owner;
     }
@@ -132,8 +135,17 @@ ssize_t minixfs_virtual_read(file_system *fs, const char *path, void *buf,
     if (!strcmp(path, "info")) {
         size_t used = get_used_datablock_count(fs);
         char* string_to_print = block_info_string(used);
-        printf("%s", string_to_print);
-        return 0;
+        ssize_t size = 0;
+        int line = 0;
+        while(1){
+            if(*(string_to_print+size) == '\n') line++;
+            size++;
+            if(line == 2) break;
+        }
+        size -= *off;
+
+        memcpy(buf, string_to_print + *off, size);
+        return size;
     }
 
     errno = ENOENT;
@@ -156,8 +168,7 @@ ssize_t minixfs_write(file_system *fs, const char *path, const void *buf,
     inode* _inode = get_inode(fs, path);
 
     if(_inode == NULL){
-        errno = ENOENT;
-        return -1;
+        _inode = minixfs_create_inode_for_path(fs, path);
     }
     
     size_t block_size = KILOBYTE * 16;
@@ -236,12 +247,7 @@ ssize_t minixfs_write(file_system *fs, const char *path, const void *buf,
     return bytes_written;
 }
 
-void print_buffer(void* buf, size_t size){
-    for(size_t i=0;i<size;i++){
-        printf("%c", *(char*)(buf+i));
-    }
-    
-}
+
 
 ssize_t minixfs_read(file_system *fs, const char *path, void *buf, size_t count,
                      off_t *off) {
@@ -254,11 +260,8 @@ ssize_t minixfs_read(file_system *fs, const char *path, void *buf, size_t count,
         errno = ENOENT;
         return -1;
     }
-
-    if(count < _inode->size){
-        count = _inode->size;
-        buf = (void*)calloc(count, 1);
-    }
+    
+    
     clock_gettime(CLOCK_REALTIME, &(_inode->atim));
 
     if (*off >= (long)_inode->size) {
@@ -300,11 +303,8 @@ ssize_t minixfs_read(file_system *fs, const char *path, void *buf, size_t count,
         *off += data_size;
         bytes_remain -= data_size;
         bytes_read += data_size;
-        
-        if(bytes_remain == 0) break;
-        
+                
     }
 
-    print_buffer(buf, _inode->size);
-    return 0;  
+    return bytes_read;  
 }
