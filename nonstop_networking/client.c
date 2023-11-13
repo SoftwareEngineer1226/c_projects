@@ -6,6 +6,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <arpa/inet.h>
+#include <sys/stat.h>
 
 #include "common.h"
 
@@ -29,78 +30,9 @@ void printBuffer(const char *buffer, size_t size) {
     }
     printf("\n");
 }
-server_response* parse_server_response(char* buffer, size_t* off, verb _verb){
 
-    char* message;
-    while(buffer[*off] != '\n'){
-        (*off)++;
-    }
 
-    message = (char*)malloc((*off));
-    memcpy(message, buffer, (*off));
 
-    printBuffer(message, *off);
-
-    if(strcmp(message, "OK") != 0 && strcmp(message, "ERROR") != 0){
-        print_invalid_response();
-        free(message);
-        return NULL;
-    }
-
-    server_response* serv_resp = (server_response*)malloc(sizeof(server_response));
-
-    if(strcmp(message, "OK") == 0){
-        serv_resp->status = OK;
-    }
-    else if(strcmp(message, "ERROR") == 0){
-        serv_resp->status = ERROR;
-
-        *off += 1;
-        size_t error_off = 0;
-        while(buffer[(*off)+error_off] != '\n'){
-            error_off++;
-        }
-        serv_resp->error_message = (char*)malloc(error_off);
-
-        memcpy(serv_resp->error_message, buffer + (*off), error_off);
-
-        *off += error_off+1;
-        
-    }
-    else{
-        print_invalid_response();
-        free(message);
-        free(serv_resp);
-        return NULL;
-    }
-    free(message);
-    return serv_resp;
-}
-
-int put_file_into_buffer(char* buffer, char* filename, size_t* off){
-    FILE *file = fopen(filename, "rb");
-
-    fseek(file, 0, SEEK_END);
-    long file_size = ftell(file);
-    rewind(file);
-    
-    size_t elements_to_send = (size_t)((file_size < MAX_BUFFER_SIZE - (long)*off) ? file_size : MAX_BUFFER_SIZE - *off);
-    
-    memcpy(buffer + *off, &elements_to_send, sizeof(size_t));
-    *off += sizeof(size_t);
-    size_t elements_read = fread(buffer+*off, 1, elements_to_send, file);
-    *off += elements_read;
-    memcpy(buffer + *off, "\0", 1);
-
-    if (elements_read != elements_to_send) {
-        perror("Error reading from the input file");
-        fclose(file);
-        return -1;
-    }
-    
-    fclose(file);
-    return 0;
-}
 
 void create_message(char* buffer, char* verb_as_char, char* filename, size_t* off){
     memcpy(buffer, verb_as_char, strlen(verb_as_char));
@@ -164,51 +96,54 @@ int main(int argc, char **argv) {
     size_t off = 0;
     create_message(buffer, verb_as_char, remotefile, &off);
     // Sending the message to the server
-    if(_verb == PUT){
-        put_file_into_buffer(buffer, remotefile, &off);
 
+    if(_verb == PUT){
+        struct stat fileStat;
+        stat("your_file.txt", &fileStat);
+        memcpy(buffer, &fileStat.st_size, sizeof(size_t));
     }
 
     if (send(sock, buffer, off, 0) < 0) {
         print_error_message("Error sending message");
         return -1;
     }
+    if(_verb == PUT){
+        int res = send_binary_file(sock, localfile);
+        printf("res: %d\n", res);
 
+
+    }
     // Receiving the message from the server
     if (read(sock, buffer, 1024) < 0) {
         print_error_message("Read error");
         return -1;
     }
     off = 0;
-    server_response* srv_rsp = parse_server_response(buffer, &off, _verb);
+    s_response* srv_rsp = parse_server_response(buffer, &off);
+    if(srv_rsp == NULL){
+        return -1;
+    }
+    if(srv_rsp->status == OK){
+        printf("OK\n");
+    }
+    else if( srv_rsp->status == ERROR){
+        printf("ERROR\n");
+        printf("%s", srv_rsp->error_message);
+        free(srv_rsp);
+        close(sock);
 
-
+        return 0;
+    }
+    off++;
+    
     if(_verb == GET || _verb == LIST){
         memcpy(&(srv_rsp->size), buffer+off, sizeof(size_t));
+        //printf("%zu\n", srv_rsp->size);
         off+=8;
-        FILE* file = NULL;
-        if(_verb == GET){
-            file = fopen(localfile, "wb");
-        }
-        else if(_verb == LIST){
-            file = stdout;
-        }
-        size_t bytes_to_read = srv_rsp->size;
-        size_t bytes_to_read_per_time = 0;
-        do{
-            size_t tmp_off = off % MAX_BUFFER_SIZE;
-            bytes_to_read_per_time = bytes_to_read > MAX_BUFFER_SIZE ? MAX_BUFFER_SIZE - tmp_off : bytes_to_read;
-            fwrite(buffer + tmp_off, bytes_to_read_per_time, 1, file);
-            bytes_to_read -= bytes_to_read_per_time;
-            off += bytes_to_read_per_time;
 
-            if(bytes_to_read <= 0) break;
-            if (read(sock, buffer, 1024) < 0) {
-                print_too_little_data();
-                return -1;
-            }
-        }while(true);
-        fclose(file);
+
+        int res = get_binary_file(sock, remotefile, srv_rsp->size);
+        printf("res: %d\n", res);
     }
 
     // Close the socket
