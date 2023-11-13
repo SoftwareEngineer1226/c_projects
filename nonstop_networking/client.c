@@ -16,6 +16,67 @@ verb check_args(char **args);
 
 
 
+typedef struct server_response{
+    status status;
+    char* error_message;
+    size_t size;
+}server_response;
+
+
+void printBuffer(const char *buffer, size_t size) {
+    for (size_t i = 0; i < size; i++) {
+        printf("%02X ", (unsigned char)buffer[i]); // Prints in hexadecimal format
+    }
+    printf("\n");
+}
+server_response* parse_server_response(char* buffer, size_t* off, verb _verb){
+
+    char* message;
+    while(buffer[*off] != '\n'){
+        (*off)++;
+    }
+
+    message = (char*)malloc((*off));
+    memcpy(message, buffer, (*off));
+
+    printBuffer(message, *off);
+
+    if(strcmp(message, "OK") != 0 && strcmp(message, "ERROR") != 0){
+        print_invalid_response();
+        free(message);
+        return NULL;
+    }
+
+    server_response* serv_resp = (server_response*)malloc(sizeof(server_response));
+
+    if(strcmp(message, "OK") == 0){
+        serv_resp->status = OK;
+    }
+    else if(strcmp(message, "ERROR") == 0){
+        serv_resp->status = ERROR;
+
+        *off += 1;
+        size_t error_off = 0;
+        while(buffer[(*off)+error_off] != '\n'){
+            error_off++;
+        }
+        serv_resp->error_message = (char*)malloc(error_off);
+
+        memcpy(serv_resp->error_message, buffer + (*off), error_off);
+
+        *off += error_off+1;
+        
+    }
+    else{
+        print_invalid_response();
+        free(message);
+        free(serv_resp);
+        return NULL;
+    }
+    free(message);
+    return serv_resp;
+}
+
 int put_file_into_buffer(char* buffer, char* filename, size_t* off){
     FILE *file = fopen(filename, "rb");
 
@@ -118,10 +179,37 @@ int main(int argc, char **argv) {
         print_error_message("Read error");
         return -1;
     }
+    off = 0;
+    server_response* srv_rsp = parse_server_response(buffer, &off, _verb);
 
-    
-    
-    printf("%s\n", buffer);
+
+    if(_verb == GET || _verb == LIST){
+        memcpy(&(srv_rsp->size), buffer+off, sizeof(size_t));
+        off+=8;
+        FILE* file = NULL;
+        if(_verb == GET){
+            file = fopen(localfile, "wb");
+        }
+        else if(_verb == LIST){
+            file = stdout;
+        }
+        size_t bytes_to_read = srv_rsp->size;
+        size_t bytes_to_read_per_time = 0;
+        do{
+            size_t tmp_off = off % MAX_BUFFER_SIZE;
+            bytes_to_read_per_time = bytes_to_read > MAX_BUFFER_SIZE ? MAX_BUFFER_SIZE - tmp_off : bytes_to_read;
+            fwrite(buffer + tmp_off, bytes_to_read_per_time, 1, file);
+            bytes_to_read -= bytes_to_read_per_time;
+            off += bytes_to_read_per_time;
+
+            if(bytes_to_read <= 0) break;
+            if (read(sock, buffer, 1024) < 0) {
+                print_too_little_data();
+                return -1;
+            }
+        }while(true);
+        fclose(file);
+    }
 
     // Close the socket
     close(sock);

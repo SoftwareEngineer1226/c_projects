@@ -10,7 +10,6 @@
 
 #define PORT 8080
 
-#define MAX_BUFFER_SIZE 1024
 
 void printBuffer(const char *buffer, size_t size) {
     for (size_t i = 0; i < size; i++) {
@@ -23,7 +22,6 @@ int main(int argc, char **argv) {
     int server_fd, sock;
     struct sockaddr_in address;
     int addrlen = sizeof(address);
-    char *message = "Hello from the server!";
     char buffer[MAX_BUFFER_SIZE];
     int bytesRead;
 
@@ -64,8 +62,35 @@ int main(int argc, char **argv) {
 
     printBuffer(buffer, MAX_BUFFER_SIZE);
     // Sending a message to the client
-    send(sock, message, strlen(message), 0);
-    printf("Message sent to the client\n");
+
+
+    FILE *file = fopen("test/dog.png", "rb");
+
+    fseek(file, 0, SEEK_END);
+    size_t file_size = ftell(file);
+    rewind(file);
+    size_t off = 0;
+    memcpy(buffer, "ERROR\n", 7);
+    off+=6;
+    memcpy(buffer + off, "fail test\n", 11);
+    off += 10;
+    memcpy(buffer+off, &file_size, sizeof(size_t));
+    off += sizeof(size_t);
+    size_t total_read = 0;
+
+    while (total_read < file_size) {
+        size_t tmp_off = off%MAX_BUFFER_SIZE;
+        size_t elements_to_read = (size_t)(((long)file_size < MAX_BUFFER_SIZE - (long)tmp_off) ? file_size : MAX_BUFFER_SIZE-(long)tmp_off);
+        size_t elements_read = fread(buffer+tmp_off, 1, elements_to_read, file);
+        
+        
+        send(sock, buffer, MAX_BUFFER_SIZE, 0);
+        total_read += elements_to_read;
+        off += elements_read;
+    }
+    fclose(file);
+
+
 
     close(sock);
 
