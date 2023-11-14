@@ -15,14 +15,54 @@
 char **parse_args(int argc, char **argv);
 verb check_args(char **args);
 
-
-
-typedef struct server_response{
+typedef struct s_response{
     status status;
     char* error_message;
     size_t size;
-}server_response;
+}s_response;
 
+s_response* parse_server_response(char* buffer, size_t* off){
+
+    while(buffer[*off] != '\n'){
+        (*off)++;
+    }
+
+    char message[(*off)];
+    memcpy(message, buffer, (*off));
+
+    if(strcmp(message, "OK") != 0 && strcmp(message, "ERROR") != 0){
+        print_invalid_response();
+        return NULL;
+    }
+
+    s_response* serv_resp = (s_response*)malloc(sizeof(s_response));
+
+    if(strcmp(message, "OK") == 0){
+        serv_resp->status = OK;
+    }
+    else if(strcmp(message, "ERROR") == 0){
+        serv_resp->status = ERROR;
+
+        *off += 1;
+        size_t error_off = 0;
+        while(buffer[(*off)+error_off] != '\n'){
+            error_off++;
+        }
+        serv_resp->error_message = (char*)malloc(error_off);
+
+        memcpy(serv_resp->error_message, buffer + (*off), error_off);
+
+        *off += error_off+1;
+        
+    }
+    else{
+
+        print_invalid_response();
+        free(serv_resp);
+        return NULL;
+    }
+    return serv_resp;
+}
 
 void printBuffer(const char *buffer, size_t size) {
     for (size_t i = 0; i < size; i++) {
@@ -30,9 +70,6 @@ void printBuffer(const char *buffer, size_t size) {
     }
     printf("\n");
 }
-
-
-
 
 void create_message(char* buffer, char* verb_as_char, char* filename, size_t* off){
     memcpy(buffer, verb_as_char, strlen(verb_as_char));
@@ -99,8 +136,8 @@ int main(int argc, char **argv) {
 
     if(_verb == PUT){
         struct stat fileStat;
-        stat("your_file.txt", &fileStat);
-        memcpy(buffer, &fileStat.st_size, sizeof(size_t));
+        stat(localfile, &fileStat);
+        memcpy(buffer + off -2, &(fileStat.st_size), sizeof(size_t));
     }
 
     if (send(sock, buffer, off, 0) < 0) {
@@ -143,7 +180,14 @@ int main(int argc, char **argv) {
 
 
         int res = get_binary_file(sock, remotefile, srv_rsp->size);
-        printf("res: %d\n", res);
+        printf("%d\n", res);
+        if(res >= 0){
+            if(res > (int)srv_rsp->size)
+                print_received_too_much_data();
+            else if(res < (int)srv_rsp->size)
+                print_too_little_data();
+        }
+        
     }
 
     // Close the socket

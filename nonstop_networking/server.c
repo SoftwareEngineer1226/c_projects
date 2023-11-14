@@ -14,6 +14,58 @@
 
 #define BASE_FOLDER "test"
 
+typedef struct c_resp{
+    verb _verb;
+    size_t size;
+    char filename[255];
+
+}c_resp;
+
+c_resp* parse_client_response(char* buffer){
+    c_resp* retval = (c_resp*) malloc(sizeof(c_resp));
+    size_t offs = 0; 
+    while(buffer[offs] != ' ' && buffer[offs] != '\n'){
+        offs+=1;
+    }
+    buffer[offs] = '\0';
+    char* buffer_ptr = &buffer[offs +1];
+
+    char c_verb[offs];
+    strcpy(c_verb, buffer);
+
+    if(strcmp(c_verb, "PUT") == 0){
+        retval->_verb = PUT;
+        size_t ptr_off = 0;
+        while(buffer_ptr[ptr_off] != '\n'){
+            ptr_off++;
+        }
+        memcpy(retval->filename, buffer_ptr, ptr_off);
+        memcpy(&retval->size, buffer_ptr + ptr_off, sizeof(size_t));
+    }
+    else if(strcmp(c_verb, "GET") == 0){
+        retval->_verb = GET;
+        size_t ptr_off = 0;
+        while(buffer_ptr[ptr_off] != '\n'){
+            ptr_off++;
+        }
+        memcpy(retval->filename, buffer_ptr, ptr_off);
+    }
+    else if(strcmp(c_verb, "LIST") == 0){
+        retval->_verb = LIST;
+    }
+    else if(strcmp(c_verb, "DELETE") == 0){
+        retval->_verb = DELETE;
+        size_t ptr_off = 0;
+        while(buffer_ptr[ptr_off] != '\n'){
+            ptr_off++;
+        }
+        memcpy(retval->filename, buffer_ptr, ptr_off);
+    }
+
+    
+    return retval;
+}
+
 void printBuffer(const char *buffer, size_t size) {
     for (size_t i = 0; i < size; i++) {
         printf("%02X ", (unsigned char)buffer[i]); // Prints in hexadecimal format
@@ -28,7 +80,7 @@ void insert_size_into_mem(char* pBuffer, size_t size) {
 
 void perform_get(char* filename, int sock) {
     printf("Server get for %s\n", filename);
-    char buffer[BUFSIZ];
+    char buffer[MAX_BUF_SIZE];
     char path[512];
     sprintf(path, "%s/%s", BASE_FOLDER, filename);
     struct stat file_info;
@@ -49,13 +101,12 @@ void perform_put(char* filename, size_t bytes_left, int sock) {
     // Plus we need to get the bytes containing the size.
 
     // We will use this buffer for a few things.
-    char buffer[BUFSIZ];
-
+    char buffer[MAX_BUF_SIZE];
+    printf("%zu\n", bytes_left);
     // Now open the output file
     char path[512];
     sprintf(path, "%s/%s", BASE_FOLDER, filename);
     get_binary_file(sock, path, bytes_left);
-    memset(buffer, 0, MAX_BUF_SIZE);
     strcpy(buffer, "OK\n");
     send_all(buffer, strlen(buffer), sock);
 
@@ -93,7 +144,7 @@ void perform_list(int sock) {
 
 void perform_delete(char* filename, int sock) {
     printf("Server delete for %s\n", filename);
-    char buffer[BUFSIZ];
+    char buffer[MAX_BUF_SIZE];
     sprintf(buffer, "%s/%s", BASE_FOLDER, filename);
     int result = unlink(buffer);
     if(result == 0) {
@@ -119,7 +170,7 @@ int main(int argc, char **argv) {
     int server_fd, sock;
     struct sockaddr_in address;
     int addrlen = sizeof(address);
-    char buffer[BUFSIZ];
+    char buffer[MAX_BUF_SIZE];
     int bytesRead;
 
     // Creating socket file descriptor
@@ -158,30 +209,22 @@ int main(int argc, char **argv) {
             print_error_message("Accept failed");
             exit(EXIT_FAILURE);
         }
-        bytesRead = recv(sock, buffer, BUFSIZ, 0);
+        bytesRead = recv(sock, buffer, MAX_BUF_SIZE, 0);
         if (bytesRead < 0) {
             perror("Error receiving data");
             exit(EXIT_FAILURE);
         }
 
-        if(strncmp(buffer, "GET", strlen("GET")) == 0) {
-            char* filename = &buffer[strlen("GET")+1];
-            char* newline = strchr(filename, '\n');
-            *newline = '\0';
-            perform_get(filename, sock);
-        } else if(strncmp(buffer, "PUT", strlen("PUT")) == 0) {
-            char* filename = &buffer[strlen("PUT")+1];
-            char* newline = strchr(filename, '\n');
-            *newline = '\0';
-            size_t bytes_used_so_far = (newline+1) - buffer;
-            perform_put(filename, bytesRead - bytes_used_so_far, sock);
-        } else if(strncmp(buffer, "LIST", 4) == 0) {
+        c_resp* resp = parse_client_response(buffer);
+
+        if(resp->_verb == GET) {
+            perform_get(resp->filename, sock);
+        } else if(resp->_verb == PUT) {
+            perform_put(resp->filename, resp->size, sock);
+        } else if(resp->_verb == LIST) {
             perform_list(sock);
-        } else if(strncmp(buffer, "DELETE", strlen("DELETE")) == 0) {
-            char* filename = &buffer[strlen("DELETE")+1];
-            char* newline = strchr(filename, '\n');
-            *newline = '\0';
-            perform_delete(filename, sock);
+        } else if(resp->_verb == DELETE) {
+            perform_delete(resp->filename, sock);
         }
         close(sock);
     }

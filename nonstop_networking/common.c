@@ -13,48 +13,7 @@
 #include "format.h"
 
 
-s_response* parse_server_response(char* buffer, size_t* off){
 
-    while(buffer[*off] != '\n'){
-        (*off)++;
-    }
-
-    char message[(*off)];
-    memcpy(message, buffer, (*off));
-
-    if(strcmp(message, "OK") != 0 && strcmp(message, "ERROR") != 0){
-        print_invalid_response();
-        return NULL;
-    }
-
-    s_response* serv_resp = (s_response*)malloc(sizeof(s_response));
-
-    if(strcmp(message, "OK") == 0){
-        serv_resp->status = OK;
-    }
-    else if(strcmp(message, "ERROR") == 0){
-        serv_resp->status = ERROR;
-
-        *off += 1;
-        size_t error_off = 0;
-        while(buffer[(*off)+error_off] != '\n'){
-            error_off++;
-        }
-        serv_resp->error_message = (char*)malloc(error_off);
-
-        memcpy(serv_resp->error_message, buffer + (*off), error_off);
-
-        *off += error_off+1;
-        
-    }
-    else{
-
-        print_invalid_response();
-        free(serv_resp);
-        return NULL;
-    }
-    return serv_resp;
-}
 
 void write_all(FILE* f, char* buffer, size_t size) {
     size_t bytes_sent = 0;
@@ -102,19 +61,17 @@ int get_binary_file(int sock, char* path, size_t size){
         return -1;
     }
     size_t total_sent = 0;
-    while(total_sent < size) {
-        int count = read(sock, buffer, MAX_BUF_SIZE);
+    while(1) {
+        int count = recv(sock, buffer, MAX_BUF_SIZE, 0);
         if(count == -1) {
             perror("read failed");
             fclose(f);
             return -1;
         }
         if(count == 0) {
-            printf("Client sent too few bytes\n");
-            fclose(f);
-            return -1;
+            break;
         }
-        //printf("%zu\n", total_sent);
+        printf("%zu\n", total_sent);
         write_all(f, buffer, count);
         total_sent += count;
     }
