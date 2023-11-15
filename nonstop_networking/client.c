@@ -10,10 +10,208 @@
 
 #include "common.h"
 
-#define MAX_BUFFER_SIZE 1024
+#define MY_EOF 1000
 
 char **parse_args(int argc, char **argv);
 verb check_args(char **args);
+
+typedef struct {
+    char inputBuffer[BUFSIZ];
+    char *pNext;
+    size_t bytes_left;
+    int sock;
+    bool end;
+} ReadState;
+
+void send_all(char* buffer, size_t size, int sock) {
+    size_t bytes_sent = 0;
+    do
+    {
+        size_t count = write(sock, &buffer[bytes_sent], size - bytes_sent);
+        if(count < 0) {
+            print_connection_closed();
+            exit(1);
+        }
+        if(count == 0) {
+            print_connection_closed();
+            exit(1);
+        }
+        bytes_sent += count;
+    } while (bytes_sent < size);
+}
+
+void start_read(ReadState* state, char* pBuffer, size_t bytes_left, int sock) {
+    memcpy(state->inputBuffer, pBuffer, bytes_left);
+    state->pNext = state->inputBuffer;
+    state->bytes_left = bytes_left;
+    state->sock = sock;
+    state->end = false;
+}
+
+int read_next(ReadState* state) {
+    if(state->end)
+        return MY_EOF;
+    if(state->bytes_left > 0) {
+        char c = *(state->pNext++);
+        state->bytes_left--;
+        return c;
+    } else {
+        int count = read(state->sock, state->inputBuffer, BUFSIZ);
+        if(count == 0) {
+            state->end = true;
+            return MY_EOF;
+        }
+        if(count == -1) {
+            print_connection_closed();
+            exit(1);
+        }
+        state->bytes_left = count;
+        state->pNext = state->inputBuffer;
+        return read_next(state);
+    }
+}
+
+void read_line(ReadState* state, char *pBuffer, bool formatError) {
+    int c;
+    while((c = read_next(state)) != MY_EOF) {
+        *pBuffer++ = (char)c;
+        if(c == '\n' || c == '\0')
+            return;
+    }
+    if(formatError)
+        print_invalid_response();
+    else
+        print_too_little_data();
+    exit(1);
+}
+
+size_t read_size(ReadState* state) {
+    size_t result;
+    char* p = (char*)(&result);
+    for(size_t i=0; i<sizeof(size_t); i++) {
+        int c = read_next(state);
+        if(c == MY_EOF) {
+            print_invalid_response();
+            exit(1);
+        }
+        *p++ = (char)c;
+    }
+    return result;
+}
+
+void handle_list_response(char* pBuffer, size_t bytes_left, int sock) {
+    ReadState state;
+    start_read(&state, pBuffer, bytes_left, sock);
+    char buffer[BUFSIZ];
+    read_line(&state, buffer, true);
+    if(strcmp(buffer, "ERROR\n") == 0) {
+        read_line(&state, buffer, true);
+        print_error_message(buffer);
+        exit(1);
+    }
+    if(strcmp(buffer, "OK\n") != 0) {
+        print_invalid_response();
+        exit(1);
+    }
+    size_t size = read_size(&state);
+    size_t count = 0;
+    do
+    {
+        int c = read_next(&state);
+        if(c == MY_EOF) {
+            print_too_little_data();
+            exit(1);
+        }
+        putchar(c);
+        count++;
+    } while (count < size);
+    int c = read_next(&state);
+    if(c != MY_EOF) {
+        print_received_too_much_data();
+        exit(1);
+    }
+}
+
+void handle_delete_response(char* pBuffer, size_t bytes_left, int sock) {
+    ReadState state;
+    start_read(&state, pBuffer, bytes_left, sock);
+    char buffer[BUFSIZ];
+    read_line(&state, buffer, true);
+    if(strcmp(buffer, "ERROR\n") == 0) {
+        read_line(&state, buffer, true);
+        print_error_message(buffer);
+        exit(1);
+    }
+    if(strcmp(buffer, "OK\n") != 0) {
+        print_invalid_response();
+        exit(1);
+    }
+    int c = read_next(&state);
+    if(c != MY_EOF) {
+        print_received_too_much_data();
+        exit(1);
+    }
+}
+
+void handle_get_response(char* pBuffer, size_t bytes_left, int sock, char* filename) {
+    ReadState state;
+    start_read(&state, pBuffer, bytes_left, sock);
+    char buffer[BUFSIZ];
+    read_line(&state, buffer, true);
+    if(strcmp(buffer, "ERROR\n") == 0) {
+        read_line(&state, buffer, true);
+        print_error_message(buffer);
+        exit(1);
+    }
+    if(strcmp(buffer, "OK\n") != 0) {
+        print_invalid_response();
+        exit(1);
+    }
+    FILE* output = fopen(filename, "wb");
+    if(output == NULL) {
+        printf("Can't open %s for writing\n", filename);
+        exit(1);
+    }
+    size_t size = read_size(&state);
+    size_t count = 0;
+    do
+    {
+        int c = read_next(&state);
+        if(c == MY_EOF) {
+            print_too_little_data();
+            exit(1);
+        }
+        fputc(c, output);
+        count++;
+    } while (count < size);
+    int c = read_next(&state);
+    if(c != MY_EOF) {
+        print_received_too_much_data();
+        exit(1);
+    }
+}
+void handle_put_response(char* pBuffer, size_t bytes_left, int sock) {
+    ReadState state;
+    start_read(&state, pBuffer, bytes_left, sock);
+    char buffer[BUFSIZ];
+    read_line(&state, buffer, true);
+    if(strcmp(buffer, "ERROR\n") == 0) {
+        read_line(&state, buffer, true);
+        print_error_message(buffer);
+        exit(1);
+    }
+    if(strcmp(buffer, "OK\n") != 0) {
+        print_invalid_response();
+        exit(1);
+    }
+    int c = read_next(&state);
+    if(c != MY_EOF) {
+        print_received_too_much_data();
+        exit(1);
+    }
+}
+
+
 
 typedef struct s_response{
     status status;
@@ -71,20 +269,48 @@ void printBuffer(const char *buffer, size_t size) {
     printf("\n");
 }
 
-void create_message(char* buffer, char* verb_as_char, char* filename, size_t* off){
-    memcpy(buffer, verb_as_char, strlen(verb_as_char));
-    *off += strlen(verb_as_char);
-    
-    if(filename != NULL){
-        memcpy(buffer + *off, " ", 1);
-        *off+=1;
-        memcpy(buffer + *off, filename, strlen(filename));
-        *off+=strlen(filename);
-    }
-    
-    memcpy(buffer + *off, "\n\0", 2);
-    *off+=2;
+void create_message(char* buffer, char* verb_as_char, char* filename){
+    if(filename != NULL && strlen(filename) > 0)
+        sprintf(buffer, "%s %s\n", verb_as_char, filename);
+    else
+        sprintf(buffer, "%s\n", verb_as_char);
 }
+
+void send_file(char* filename, int sock) {
+    struct stat file_info;
+    stat(filename, &file_info);
+    FILE* f = fopen(filename, "rb");
+    if(f == NULL) {
+        printf("Can't open file %s\n", filename);
+        exit(1);
+    }
+    write(sock, (char*)(&file_info.st_size), sizeof(size_t));
+    size_t bytes_written = 0;
+    char buffer[BUFSIZ];
+    do
+    {
+        size_t count = fread(buffer, 1, BUFSIZ, f);
+        if(count == 0 || ferror(f)) {
+            printf("error reading file");
+            fclose(f);
+            exit(1);
+        }
+        size_t innerCount = 0;
+        do
+        {
+            size_t count2 = write(sock, buffer, count - innerCount);
+            if(count2 <= 0) {
+                print_connection_closed();
+                fclose(f);
+                exit(1);
+            }
+            innerCount += count2;
+        } while (innerCount < count);
+        bytes_written += count;
+    } while (bytes_written < (size_t)file_info.st_size);
+    fclose(f);
+}
+
 
 int main(int argc, char **argv) {
     char** args = parse_args(argc, argv);
@@ -96,18 +322,19 @@ int main(int argc, char **argv) {
     int port = atoi(args[1]);
     char* verb_as_char = args[2];
     verb _verb = check_args(args);
-    char* remotefile = NULL;
-    char* localfile = NULL;
+    char* firstFile = NULL;
+    char* secondFile = NULL;
     if(argc > 3){
-        remotefile = args[3];
+        firstFile = args[3];
+        secondFile = args[3];
     }
     if(argc > 4){
-        localfile = args[4];
+        secondFile = args[4];
     }
 
     int sock = 0;
     struct sockaddr_in serv_addr;
-    char buffer[MAX_BUFFER_SIZE] = {0};
+    char buffer[BUFSIZ] = {0};
 
     // Creating a socket
     if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
@@ -130,70 +357,40 @@ int main(int argc, char **argv) {
         return -1;
     }
 
-    size_t off = 0;
-    create_message(buffer, verb_as_char, remotefile, &off);
-    // Sending the message to the server
-
+    create_message(buffer, verb_as_char, firstFile);
+    send_all(buffer, strlen(buffer), sock);
     if(_verb == PUT){
-        struct stat fileStat;
-        stat(localfile, &fileStat);
-        memcpy(buffer + off -2, &(fileStat.st_size), sizeof(size_t));
+        send_file(firstFile, sock);
     }
 
-    if (send(sock, buffer, off, 0) < 0) {
-        print_error_message("Error sending message");
-        return -1;
-    }
-    if(_verb == PUT){
-        int res = send_binary_file(sock, localfile);
-        printf("res: %d\n", res);
-
-
-    }
     // Receiving the message from the server
-    if (read(sock, buffer, 1024) < 0) {
+    int recvCount = read(sock, buffer, BUFSIZ); 
+    if ( recvCount < 0) {
         print_error_message("Read error");
         return -1;
     }
-    off = 0;
-    s_response* srv_rsp = parse_server_response(buffer, &off);
-    if(srv_rsp == NULL){
-        return -1;
-    }
-    if(srv_rsp->status == OK){
-        printf("OK\n");
-    }
-    else if( srv_rsp->status == ERROR){
-        printf("ERROR\n");
-        printf("%s", srv_rsp->error_message);
-        free(srv_rsp);
-        close(sock);
 
-        return 0;
+    if(_verb == LIST) {
+        handle_list_response(buffer, recvCount, sock);
+        exit(0);
     }
-    off++;
-    
-    if(_verb == GET || _verb == LIST){
-        memcpy(&(srv_rsp->size), buffer+off, sizeof(size_t));
-        //printf("%zu\n", srv_rsp->size);
-        off+=8;
-
-
-        int res = get_binary_file(sock, remotefile, srv_rsp->size);
-        printf("%d\n", res);
-        if(res >= 0){
-            if(res > (int)srv_rsp->size)
-                print_received_too_much_data();
-            else if(res < (int)srv_rsp->size)
-                print_too_little_data();
-        }
-        
+    if(_verb == DELETE) {
+        handle_delete_response(buffer, recvCount, sock);
+        print_success();
+        exit(0);
     }
-
-    // Close the socket
+    if(_verb == GET) {
+        handle_get_response(buffer, recvCount, sock, secondFile);
+        exit(0);
+    }
+    if(_verb == PUT) {
+        handle_put_response(buffer, recvCount, sock);
+        print_success();
+        exit(0);
+    }
     close(sock);
-
-    return 0;
+    print_client_usage();
+    return 1;
 }
 
 /**
@@ -256,7 +453,7 @@ verb check_args(char **args) {
     }
 
     if (strcmp(command, "GET") == 0) {
-        if (args[3] != NULL && args[4] != NULL) {
+        if (args[3] != NULL) {
             return GET;
         }
         print_client_help();
@@ -272,7 +469,7 @@ verb check_args(char **args) {
     }
 
     if (strcmp(command, "PUT") == 0) {
-        if (args[3] == NULL || args[4] == NULL) {
+        if (args[3] == NULL ) {
             print_client_help();
             exit(1);
         }

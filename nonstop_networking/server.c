@@ -14,58 +14,6 @@
 
 #define BASE_FOLDER "test"
 
-typedef struct c_resp{
-    verb _verb;
-    size_t size;
-    char filename[255];
-
-}c_resp;
-
-c_resp* parse_client_response(char* buffer){
-    c_resp* retval = (c_resp*) malloc(sizeof(c_resp));
-    size_t offs = 0; 
-    while(buffer[offs] != ' ' && buffer[offs] != '\n'){
-        offs+=1;
-    }
-    buffer[offs] = '\0';
-    char* buffer_ptr = &buffer[offs +1];
-
-    char c_verb[offs];
-    strcpy(c_verb, buffer);
-
-    if(strcmp(c_verb, "PUT") == 0){
-        retval->_verb = PUT;
-        size_t ptr_off = 0;
-        while(buffer_ptr[ptr_off] != '\n'){
-            ptr_off++;
-        }
-        memcpy(retval->filename, buffer_ptr, ptr_off);
-        memcpy(&retval->size, buffer_ptr + ptr_off, sizeof(size_t));
-    }
-    else if(strcmp(c_verb, "GET") == 0){
-        retval->_verb = GET;
-        size_t ptr_off = 0;
-        while(buffer_ptr[ptr_off] != '\n'){
-            ptr_off++;
-        }
-        memcpy(retval->filename, buffer_ptr, ptr_off);
-    }
-    else if(strcmp(c_verb, "LIST") == 0){
-        retval->_verb = LIST;
-    }
-    else if(strcmp(c_verb, "DELETE") == 0){
-        retval->_verb = DELETE;
-        size_t ptr_off = 0;
-        while(buffer_ptr[ptr_off] != '\n'){
-            ptr_off++;
-        }
-        memcpy(retval->filename, buffer_ptr, ptr_off);
-    }
-
-    
-    return retval;
-}
-
 void printBuffer(const char *buffer, size_t size) {
     for (size_t i = 0; i < size; i++) {
         printf("%02X ", (unsigned char)buffer[i]); // Prints in hexadecimal format
@@ -73,6 +21,39 @@ void printBuffer(const char *buffer, size_t size) {
     printf("\n");
 }
 
+void send_all(char* buffer, size_t size, int sock) {
+    size_t bytes_sent = 0;
+    do
+    {
+        size_t count = write(sock, &buffer[bytes_sent], size - bytes_sent);
+        if(count < 0) {
+            perror("Client socket:");
+            return;
+        }
+        if(count == 0) {
+            printf("Client disconnected\n");
+            return;
+        }
+        bytes_sent += count;
+    } while (bytes_sent < size);
+}
+
+void write_all(FILE* f, char* buffer, size_t size) {
+    size_t bytes_sent = 0;
+    do
+    {
+        size_t count = fwrite(&buffer[bytes_sent], 1, size - bytes_sent, f);
+        if(count < 0) {
+            perror("Output file");
+            return;
+        }
+        if(count == 0) {
+            printf("Output write failed\n");
+            return;
+        }
+        bytes_sent += count;
+    } while (bytes_sent < size);
+}
 
 void insert_size_into_mem(char* pBuffer, size_t size) {
     memcpy(pBuffer, &size, sizeof(size_t));
@@ -80,71 +61,111 @@ void insert_size_into_mem(char* pBuffer, size_t size) {
 
 void perform_get(char* filename, int sock) {
     printf("Server get for %s\n", filename);
-    char buffer[MAX_BUF_SIZE];
-    char path[512];
-    sprintf(path, "%s/%s", BASE_FOLDER, filename);
+    char buffer[BUFSIZ];
+    sprintf(buffer, "%s/%s", BASE_FOLDER, filename);
     struct stat file_info;
-    stat(path, &file_info);
-
+    stat(buffer, &file_info);
+    FILE* f = fopen(buffer, "rb");
+    if(f == NULL) {
+        sprintf(buffer, "ERROR\nUnknown file\n");
+        send_all(buffer, strlen(buffer), sock);
+        return;
+    }
     // Set up the header
-    strcpy(buffer, "OK\n"); // Note we will overwrite 12345678 with a size_t
-    char *pBuffer = buffer + strlen(buffer) + sizeof(size_t);
-    insert_size_into_mem(buffer+3, file_info.st_size);
+    strcpy(buffer, "OK\n12345678"); // Note we will overwrite 12345678 with a size_t
+    char *pBuffer = buffer + strlen(buffer);
+    insert_size_into_mem(&buffer[3], file_info.st_size);
     send_all(buffer, pBuffer - buffer, sock);
-
-    send_binary_file(sock, path);
+    size_t bytes_read = 0;
+    do
+    {
+        int count = fread(buffer, 1, BUFSIZ, f);
+        if(count < 0) {
+            perror("Get failed");
+            fclose(f);
+            return;
+        }
+        if(count == 0) {
+            printf("Client terminated early\n");
+            fclose(f);
+            return;
+        }
+        bytes_read += count;
+        send_all(buffer, count, sock);
+    } while (bytes_read < (size_t)file_info.st_size);
+    fclose(f);    
 }
 
-void perform_put(char* filename, size_t bytes_left, int sock) {
+void perform_put(char* filename, size_t bytes_left, char* fileDataStart, int sock) {
     printf("Server put for %s\n", filename);
     // Put is tricky since we have already read some of the bytes in the file into the buffer in the initial read.
     // Plus we need to get the bytes containing the size.
 
     // We will use this buffer for a few things.
-    char buffer[MAX_BUF_SIZE];
-    printf("%zu\n", bytes_left);
-    // Now open the output file
-    char path[512];
-    sprintf(path, "%s/%s", BASE_FOLDER, filename);
-    get_binary_file(sock, path, bytes_left);
-    strcpy(buffer, "OK\n");
-    send_all(buffer, strlen(buffer), sock);
+    char buffer[BUFSIZ];
 
+    // Read the size
+    size_t size;
+    read(sock, (char*)(&size), sizeof(size_t));
+
+    // Now open the output file
+    sprintf(buffer, "%s/%s", BASE_FOLDER, filename);
+    FILE* f = fopen(buffer, "wb");
+    if(f == NULL) {
+        sprintf(buffer, "ERROR\n%s\n", strerror(errno));
+        return;
+    }
+    size_t total_sent = 0;
+
+    while(total_sent < size) {
+        int count = read(sock, buffer, BUFSIZ);
+        if(count == -1) {
+            perror("read failed");
+            fclose(f);
+            return;
+        }
+        if(count == 0) {
+            printf("Client sent too few bytes\n");
+            fclose(f);
+            return;
+        }
+        write_all(f, buffer, count);
+        total_sent += count;
+    }
+    fclose(f);
+    sprintf(buffer, "OK\n");
+    send_all(buffer, strlen(buffer), sock);
 }
 
 void perform_list(int sock) {
     printf("Server list\n");
-    char buffer[MAX_BUF_SIZE];
-    strcpy(buffer, "OK\n"); // Note we will overwrite 12345678 with a size_t
-    char *pBuffer = buffer + strlen(buffer) + sizeof(size_t);
+    char buffer[BUFSIZ];
+    strcpy(buffer, "OK\n12345678"); // Note we will overwrite 12345678 with a size_t
+    char *pBuffer = buffer + strlen(buffer);
     size_t dataSize = 0;
     DIR *d;
     struct dirent *dir;
     d = opendir(BASE_FOLDER);
-    char list_buffer[MAX_BUF_SIZE];
-    char* lbfr_ptr = &list_buffer[0]; 
     if (d) {
         while ((dir = readdir(d)) != NULL) {
-            char filename[MAX_BUF_SIZE];
+            char filename[BUFSIZ];
             sprintf(filename, "%s\n", dir->d_name);
-            strcpy(lbfr_ptr, filename);
+            if(*filename == '.')
+                continue;
+            strcpy(pBuffer, filename);
             size_t len = strlen(filename);
-            lbfr_ptr += len;
+            pBuffer += len;
             dataSize += len;
         }
     }
-    insert_size_into_mem(buffer + 3, dataSize);
-
-    send_all(buffer, pBuffer - buffer, sock);
-
     closedir(d);
-
-    send_all(list_buffer, dataSize, sock);
+    insert_size_into_mem(&buffer[3], dataSize);
+    send_all(buffer, pBuffer - buffer, sock);
 }
 
 void perform_delete(char* filename, int sock) {
     printf("Server delete for %s\n", filename);
-    char buffer[MAX_BUF_SIZE];
+    char buffer[BUFSIZ];
     sprintf(buffer, "%s/%s", BASE_FOLDER, filename);
     int result = unlink(buffer);
     if(result == 0) {
@@ -170,7 +191,7 @@ int main(int argc, char **argv) {
     int server_fd, sock;
     struct sockaddr_in address;
     int addrlen = sizeof(address);
-    char buffer[MAX_BUF_SIZE];
+    char buffer[BUFSIZ];
     int bytesRead;
 
     // Creating socket file descriptor
@@ -209,22 +230,30 @@ int main(int argc, char **argv) {
             print_error_message("Accept failed");
             exit(EXIT_FAILURE);
         }
-        bytesRead = recv(sock, buffer, MAX_BUF_SIZE, 0);
+        bytesRead = recv(sock, buffer, BUFSIZ, 0);
         if (bytesRead < 0) {
             perror("Error receiving data");
             exit(EXIT_FAILURE);
         }
 
-        c_resp* resp = parse_client_response(buffer);
-
-        if(resp->_verb == GET) {
-            perform_get(resp->filename, sock);
-        } else if(resp->_verb == PUT) {
-            perform_put(resp->filename, resp->size, sock);
-        } else if(resp->_verb == LIST) {
+        if(strncmp(buffer, "GET", strlen("GET")) == 0) {
+            char* filename = &buffer[strlen("GET")+1];
+            char* newline = strchr(filename, '\n');
+            *newline = '\0';
+            perform_get(filename, sock);
+        } else if(strncmp(buffer, "PUT", strlen("PUT")) == 0) {
+            char* filename = &buffer[strlen("PUT")+1];
+            char* newline = strchr(filename, '\n');
+            *newline = '\0';
+            size_t bytes_used_so_far = (newline+1) - buffer;
+            perform_put(filename, bytesRead - bytes_used_so_far, newline+1, sock);
+        } else if(strncmp(buffer, "LIST", 4) == 0) {
             perform_list(sock);
-        } else if(resp->_verb == DELETE) {
-            perform_delete(resp->filename, sock);
+        } else if(strncmp(buffer, "DELETE", strlen("DELETE")) == 0) {
+            char* filename = &buffer[strlen("DELETE")+1];
+            char* newline = strchr(filename, '\n');
+            *newline = '\0';
+            perform_delete(filename, sock);
         }
         close(sock);
     }
