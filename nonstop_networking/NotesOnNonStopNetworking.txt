@@ -1,0 +1,415 @@
+The goal is to write a client server application. The server maintains a temp directory containing files. And the client can send commands to the server GET, to get a file, PUT to save a file, DELETE to delete a file and LIST to list all the files.
+
+The communication has to occur over a TCP/IP socket with a well defined protocol:
+* For GET the protocol is:
+* First the text "GET filename\n" where filename is the filename to be read
+Response is
+* 8 bytes containing the size of the file (little endian)
+* then all the bytes of the file
+
+* For PUT the protocol is:
+* First the text "PUT filename\n", where filename is the filename to be sent
+* Then 8 bytes containg the size of the file (little endian)
+* Then all the bytes of the file
+Response:
+* "OK\n"
+
+* for DELETE the protocol is:
+* First the text "DELETE filename\n", where filename is the filename to be deleted
+Response:
+* "OK\n"
+
+* for LIST the protocol is:
+* first the text is "LIST\n"
+Response:
+* 8 bytes containin the size of the file list (little endian)
+* The names of the files separated by \n characters
+
+In all cases if there is an error in the command the response will be:
+* "ERROR\n"
+* followed by an error message and a \n
+
+Files will be stored in a temp directory made with mktemp, however the server will maintain a copy of all the files in a vector.
+
+You will be supplied with functions for vector operations and dictionary operations (to map from a socket id to a session data structure) You will also be provided with some infrastructure to fit the program into:
+
+a few rules
+* You may not use C++, C only.
+* You can't use any external libraries
+* all new code has to go in server.c, client.c, common.c and common.h. This is unfortunate since it puts everything in one huge lump, but it is the rules.
+* please make sure to run it with some load from multiple clients
+* Please make sure to run valgrind to detect any memory leaks.
+
+
+
+
+
+How I would like to approach the server:
+
+1. Get a basic epoll process working. This seems to be a great starting point: https://web.archive.org/web/20120504033548/https://banu.com/blog/2/how-to-use-epoll-a-complete-example-in-c/
+
+2. Create a type and set of functions for handling the input and output over a non blocking socket.
+The idea here would be to create a type called Stream:
+
+// This indicates that a stream we are reading has come to an end, and the client has stopped sending data
+#define STREAM_END   1001
+// This inidcates tha a stream we are reading has no more data, but the client is still sending, however reading it would block the process
+#define STREAM_PENDING      1002
+// This indicates the stream is in error
+#define STREAM_ERROR 1003
+// This return code indicates everything completed without blocking
+#define STREAM_DONE  1004
+
+// Struct representing a stream of data on a socket
+typedef struct {
+	char buffer[BUFSIZ];   // The buffer we have read in already, or if a write, the buffer we are writing out
+	int socket;            // The socket this stream is using
+	size_t position;       // Next position within the buffer (either the next char to be returned, or the next one to be written
+	size_t bytesInBuffer;  // Total bytes that were read into the buffer, this is not needed when writing, since position serves that purpose
+	bool atEnd;            // Set true if at the end of the stream (after a STREAM_END has been returned)
+	bool inError;          // Set true if at the stream has an error (after STREAM_ERROR has been returned)
+} Stream;
+
+// Flush the rest of the write buffer to the socket, and clear it out, however, don't block. This can return STREAM_END, STREAM_PENDING, STREAM_ERROR or STREAM_OK
+int Stream_Send(Stream* stream);
+
+// Write next character to buffer, and flush to stream if buffer is full. This can return STREAM_END, STREAM_PENDING, or STREAM_ERROR
+int Stream_WriteNext(Stream* stream, char c);
+// Read the next character from the stream without blocking, or send back STREAM_END, STREAM_PENDING or STREAM_ERROR
+int Stream_GetNext(Stream* stream);
+// Reset a stream to initial state with the socket passed in
+void Stream_Reset(Stream* stream, int socket);
+// Return true is there is data still in the buffer unread
+bool Stream_has_more(Stream* stream) {
+
+
+// Reset a stream to initial state with the socket passed in
+void Stream_Reset(Stream* stream, int socket) {
+	stream->socket = socket;
+	stream->position = 0;
+	stream->bytesInBuffer = 0;
+	stream->atEnd = false;
+	stream->inError = false;
+}
+
+// Read the next character from the stream without blocking, or send back STREAM_END, STREAM_PENDING or STREAM_ERROR
+int Stream_GetNext(Stream* stream) {
+	assert(! stream->atEnd && ! stream->error); // Shouldn't be called when the stream is no longer viable
+	if(stream->position < stream->bytesInBuffer) {
+		return stream->buffer[stream->position+];
+	}
+	stream->position = 0;
+	size_t count = read(sock, buffer, BUFSIZ);
+	if(count == 0) {
+		stream->atEnd = true;
+		return STREAM_END;
+	}
+	if(count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+		return STREAM_PENDING;
+	}
+	if(count < 0) {
+		stream->inError = true;
+		return STREAM_ERROR;
+	}
+	stream->bytesInBuffer = count;
+	return stream->buffer[stream->position+];
+}
+// Write next character to buffer, and flush to stream if buffer is full. This can return STREAM_END, STREAM_PENDING, or STREAM_ERROR
+int Stream_WriteNext(Stream* stream, char c) {
+	assert(! stream->atEnd && ! stream->error); // Shouldn't be called when the stream is no longer viable
+	if(stream->position == BUFSIZ) {
+		int result = Stream_SendUntilBlock(stream);
+		if(result != STREAM_OK)
+			return result;
+		assert(stream->position = 0);
+		stream->buffer[stream->position++] = c;
+	}
+}
+
+// Flush the rest of the write buffer to the socket, and clear it out, however, don't block. This can return STREAM_END, STREAM_PENDING, STREAM_ERROR or STREAM_OK
+int Stream_Send(Stream* stream) {
+	size_t count = write(stream->socket, stream->buffer, stream->position);
+	if(count == 0) {
+		stream->atEnd = true;
+		return STREAM_END;
+	}
+	if(count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) {
+		// Note this is a bad situation. It really should never arise, the socket should be able to accept SOME bytes. So we treat this like an
+		// error
+		stream->inError = true;
+		return STREAM_ERROR;
+	}
+	if(count < 0) {
+		stream->inError = true;
+		return STREAM_ERROR;
+	}
+	if(count < stream->position) {
+		// We didn't manage to write everything, so copy down what is left
+		memmove(stream->buffer, &stream->buffer[count], stream->position - count);
+		stream->position -= count;
+		return STREAM_PENDING;
+	}
+	stream->position = 0;
+	return STREAM_DONE;
+}
+
+// Return true is there is data still in the buffer unread
+bool Stream_has_more(Stream* stream) {
+	return stream->bytesInBuffer > 0 && stream->position < stream->bytesInBuffer);
+}
+
+3. Once we have this set up we can create a type called Session:
+
+// Returned to mean session is still good but must wait for the client on the socket
+#define SESSION_WAIT  2001
+// Returned to mean that the session has ended.
+#define SESSION_END   2002
+// Returned to mean that the session had a communication error
+#define SESSION_ERROR 2003
+
+typedef struct {
+	Stream stream;          // Used to buffer both input and output from the stream. Please note we do not read and write at the same time. Always read, then write
+	int state;				// Current state of the session -- what is it doing/
+	char input[BUFSIZ];     // When reading the header, it is loaded in here.
+	char filename[BUFSIZ]l  // Filename for command
+	size_t inputPos;        // When reading the header this is the next position to put the next character
+	FILE* fd;				// For file based operations, GET and PUT this is the file we are reading or writing
+	int status;             // Status of the session is either SESSION_WAIT meaning it is waiting for more data
+							// to read or write, SESSION_END where it is ended or SESSION_ERROR if it is in error
+	char* listData;			// When we get a LIST command we have to generate the full list and buffer in memory in case ongoing commands
+							// in parallel change the list. So this is a malloced buffer containing that list
+	size_t listDataPos;		// When writing out list data in multiple buffer writes, this is position we have already writeen up to
+	bool reading;           // IS this session currently reading from the socket or writing to it
+} Session;
+
+Session* Session_create(int sock) {
+	Session* session = malloc(sizeof(Session);
+	Stream_Reset(&session->stream);
+	session->state = STATE_READING_HEADER;
+	memset(session->input, 0, BIFSIZ);
+	memset(session->filename, 0, BIFSIZ);
+	session->inputPos = 0;
+	session->fd = NULL;
+	session->status = STATUS_SESSION_WAIT;
+	session-listData = NULL;
+	session->listDataPos = 0;
+	session->reading = true;
+}
+
+// When this socket recieves a signal from epoll that it is ready this is called to process the data received.
+void Session_processNext(Session* session);
+
+
+int Session_processNext(Session* session) {
+	bool continue = false;
+	do
+	{
+		switch(session->state) {
+			case STATE_WRITING:
+				continue = continue_writing(session);
+				break;
+			case STATE_READING_HEADER:
+				continue = continue_reading_header(session);
+				break;
+			case STATE_SENDING_GET: 
+				continue = continue_sending_get(session);
+				break;
+			case STATE_READING_PUT:
+				continue = continue_reading_put(session);
+				break;
+			case STATE_WRITING_LIST:
+				continue = continue_writing_list(session);
+				break;
+			default:
+				assert(false); Should never be in anything except the above states.
+		}
+	}while(continue);
+	return session->status;
+}
+
+// Called when we get data and we are in the middle of reading the header
+bool continue_reading_header(Session* session) {
+	do
+	{
+		int c = Stream_getNext(&session->stream);
+		if(c == STREAM_END) {
+			send_short_string("Invalid request\n"); // TODO replace this with the correct string
+			session->status = STATUS_SESSION_END;
+			return;
+		}
+		if(c == STREAM_ERROR) {
+			// We can't send an error here becasue the socket stream is bad so just close
+			session->status = STATUS_SESSION_END;
+		}
+		if(c == STREAM_PENDING) {
+			// Waiting for more info, so do nothing
+			return;
+		}
+		session->input[session->inputPos++] = c;
+		if(tryParse("LIST", false))
+			session_start_list(session);
+		else if(tryParse("GET", true))
+			session_start_get(session);
+		else if(tryParse("PUT", true))
+			session_start_put(session);
+		else if(tyParse("DELETE", true))
+			session_start_delete(session));
+	} while(session->state == STATE_READING_HEADER);
+	return Session_has_more(&session->stream);
+}
+
+// Called when in the middle of writing out data for a string such as response or error
+void continue_writing(Session* session) {
+	int result = Stream_Send(&session->stream);
+	if(result == STREAM_ERROR) {
+		session->state = STATE_SESSION_DONE;
+		session->status = STATUS_SESSION_ERROR;
+		return;
+	}
+	if(result == STREAM_DONE) {
+		session->state = STATE_SESSION_DONE;
+		session->status = STATUS_SESSION_END;
+	}
+	// We wrote part of the output, stay in this state to try again when output unblocks
+	assert(result == STREAM_PENDING);
+	return false;
+}
+
+// Called when in the middle of a PUT reading data
+void continue_put(Session* session) {
+	char buffer[BUFSIZ];
+	char*p = buffer;
+	int c;
+	while(true) {
+		c = Stream_GetNext(&session->stream);
+		if(c == STREAM_END || c == STREAM_ERROR || c == STREAM_PENDING)
+			break;{
+		*p++ = c;
+	}
+	// TODO There is a potentional problem here if the fwrite doesn't write the whole block
+	fwrite(buffer, 1, p - buffer, session->fd);
+	if(c == STREAM_END) {
+		end_session(session);
+		return false;
+	}
+	if(c == STREAM_ERROR) {
+		end_session_error(session);
+		return false;
+	}
+}
+
+void continue_get(Session* session) {
+	// TBD
+}
+
+bool TryParse(char* cmd, bool hasFilename) {
+	size_t cmdLen = strlen(cmd);
+	if(strncmp(session->input, cmd, cmdLen) != 0)
+		return false;
+	if(hasFilename) {
+		if(session->input[cmdLen] != ' ') 
+			return false;
+		char* nl = strchr(session->input, '\n');
+		if(nl == NULL)
+			return false;
+		char* filenameStart = &session->input[cmdLen+1];
+		strncpy(session->filename, filenameStart, filenameStart - nl);
+	}
+}
+
+void session_start_list(Session* session) {
+	// Note we assume there is a vector called directory storing the directory of all files in the temp folder
+	// We do this as per instructions rather than reading the filesystem directly.
+	size_t sizeCount = 0;
+	for(int i=0; i < vector_size(directory); i++)
+		sizeCount += strlen((char*)vector_get(directory, i)) + 1; // +1 for the newline
+	sizeCount++; // Add one for the end null character;
+	session->listData = malloc(sizeCount);
+	char* end = session->listData;
+	for(int i=0; i < vector_size(directory); i++) {
+		size_t len = strlen((char*)vector_get(directory, i));
+		strcpy(end, vector_get(directory, i);
+		end[len] = '\n';
+		end += len + 1;
+	}
+	*end = '\0';
+	
+}
+session_start_get(Session* session) {
+	session->fd = fopen(session->filename, "r");
+	if(fd == NULL) {
+		write_short_string("ERROR\n%s\n", strerror(errno));
+		return;
+	}
+	size_t size;
+	char* pSize = (char*)(&size);
+	for(int i=0; i < sizeof(size); i++) {
+		// TODO in weird cases when might not get all bytes in one block so Stream_GetNext might return STREAM_PENDING, ERROR etc.
+		// We should deal with this.
+		*pSize++ = Stream_GetNext(&session->stream);
+	}
+	int c;
+	do
+	{
+		c = Stream_GetNext(&session->stream);
+		if(c == SESSION_END)
+		.... TBD ...
+	}
+}
+session_start_put(Session* session) {
+	// TBD
+}
+session_start_delete(Session* session)) {
+	// TBD
+}
+
+// This writes a short string in response to the client and quits. However, it must account for
+// the fact that the write could block. So it tries to write the whole thing, but if not puts the state to STATE_WRITING
+// Note the string is "short" because it fits entirely in the stream buffer. For longer writes a different approach is needed
+void write_short_string(Session* session, char* str) {
+	char c;
+	int result STREAM_OK;
+	while(c = *str++ && result == STREAM_OK) {
+		result = Stream_WriteNext(&session->stream, c);
+	}
+	if(result == STREAM_OK) {
+		result = Stream_Send(&session->stream);
+	}
+	if(result == STREAM_END) {
+		session->state = STATE_SESSION_DONE;
+		session->status = STATUS_SESSION_END;
+	}
+	else
+	{
+		session->state = STATE_WRITING;
+	}
+}
+
+void end_session(Session* session) {
+	session->state = STATE_SESSION_DONE;
+	session->status = STATUS_SESSION_END;
+	if(session->fd != NULL)
+		fclose(session->fd);
+	if(session->listData)
+		free(session->listData);
+}
+
+void end_session(Session* session) {
+	session->state = STATE_SESSION_DONE;
+	session->status = STATUS_SESSION_END;
+	if(session->fd != NULL) {
+		fclose(session->fd);
+		unlink(session->filename);
+	}
+	if(session->listData)
+		free(session->listData);
+}
+
+
+4. We will also have some sort of global object that manages what is in the file directory, which will be a vector of strings with the names, and of course you'll save them to the temp folder as explained in the instructions.
+
+5. I think with all this we should be pretty good, and have something that meets the requirements.
+
+
+
+
