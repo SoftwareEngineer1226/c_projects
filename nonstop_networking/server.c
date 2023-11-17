@@ -328,13 +328,13 @@ void session_start_put(Session* session, size_t cmdLen) {
         
         size_t head_size = cmdLen + strlen(session->filename) + 2; // "PUT abc.png\n"
     
-        if(session->inputPos >= head_size + 8) {
+        if(session->inputPos > head_size + 8) {
             memcpy(&session->totalBytesForPut, &session->input[head_size], sizeof(size_t));
 
             size_t nowSendingBytes = session->inputPos - head_size - 8;
         
             if(nowSendingBytes > 0) {
-                write_all(session->fd, &session->stream.buffer[head_size + 8], nowSendingBytes);
+                write_all(session->fd, &session->input[head_size + 8], nowSendingBytes);
                 session->totalsent = nowSendingBytes;
             }
 
@@ -504,6 +504,7 @@ void write_all(FILE* f, char* buffer, size_t size) {
             printf("Output write failed\n");
             return;
         }
+        printf("%zu\n", count);
         bytes_sent += count;
     } while (bytes_sent < size);
 }
