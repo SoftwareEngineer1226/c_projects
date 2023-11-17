@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/stat.h>
+#include <poll.h>
 
 #include "common.h"
 
@@ -56,6 +57,21 @@ int read_next(ReadState* state) {
         state->bytes_left--;
         return c;
     } else {
+        struct pollfd fds[1];
+        int timeout = 1000; // ms
+        fds[0].fd = state->sock;
+        fds[0].events = POLLIN|POLLPRI;
+        fds[0].revents = 0;
+        int res = poll(fds, 1, timeout);
+        if (res == 0)
+        {
+            //printf("poll timeout\n");
+            return MY_EOF;
+        } else if (res < 0) {
+            printf("error in poll\n");
+            return MY_EOF;
+        }
+        
         int count = read(state->sock, state->inputBuffer, BUFSIZ);
         if(count == 0) {
             state->end = true;
@@ -158,12 +174,12 @@ void handle_get_response(char* pBuffer, size_t bytes_left, int sock, char* filen
     start_read(&state, pBuffer, bytes_left, sock);
     char buffer[BUFSIZ];
     read_line(&state, buffer, true);
-    if(strcmp(buffer, "ERROR\n") == 0) {
+    if(strncmp(buffer, "ERROR\n", 6) == 0) {
         read_line(&state, buffer, true);
         print_error_message(buffer);
         exit(1);
     }
-    if(strcmp(buffer, "OK\n") != 0) {
+    if(strncmp(buffer, "OK\n", 3) != 0) {
         print_invalid_response();
         exit(1);
     }
@@ -195,12 +211,12 @@ void handle_put_response(char* pBuffer, size_t bytes_left, int sock) {
     start_read(&state, pBuffer, bytes_left, sock);
     char buffer[BUFSIZ];
     read_line(&state, buffer, true);
-    if(strcmp(buffer, "ERROR\n") == 0) {
+    if(strncmp(buffer, "ERROR\n", 6) == 0) {
         read_line(&state, buffer, true);
         print_error_message(buffer);
         exit(1);
     }
-    if(strcmp(buffer, "OK\n") != 0) {
+    if(strncmp(buffer, "OK\n", 3) != 0) {
         print_invalid_response();
         exit(1);
     }
@@ -360,7 +376,7 @@ int main(int argc, char **argv) {
     create_message(buffer, verb_as_char, firstFile);
     send_all(buffer, strlen(buffer), sock);
     if(_verb == PUT){
-        send_file(firstFile, sock);
+        send_file(secondFile, sock);
     }
 
     // Receiving the message from the server

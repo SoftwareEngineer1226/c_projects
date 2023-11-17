@@ -18,7 +18,7 @@ CFLAGS_DEBUG = $(CFLAGS_COMMON) -O0 -g -DDEBUG
 LD = clang
 PROVIDED_LIBRARIES:=$(shell find libs/ -type f -name '*.a' 2>/dev/null)
 PROVIDED_LIBRARIES:=$(PROVIDED_LIBRARIES:libs/lib%.a=%)
-LDFLAGS = -Llibs/ $(foreach lib,$(PROVIDED_LIBRARIES),-l$(lib)) -lm
+LDFLAGS = -Llibs/ $(foreach lib,$(PROVIDED_LIBRARIES),-l$(lib)) -lm -lpthread
 
 .PHONY: all
 all: release
