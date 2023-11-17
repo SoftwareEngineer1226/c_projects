@@ -105,40 +105,10 @@ bool continue_reading_put(Session* session);
 bool TryParse(Session* session, char* cmd, bool hasFilename);
 int Session_processNext(Session* session);
 void write_short_string(Session* session, char* str);
-bool get_filename(Session* session, size_t cmdLen);
 
 void insert_size_into_mem(char* pBuffer, size_t size);
 void send_all(char* buffer, size_t size, int sock);
 void write_all(FILE* f, char* buffer, size_t size);
-
-bool get_filename(Session* session, size_t cmdLen)
-{
-    do {
-        int c = Stream_GetNext(&session->stream);
-        if(c == STREAM_END) {
-            //send_short_string("Invalid request\n"); // TODO replace this with the correct string
-            //session->status = STATUS_SESSION_END;
-            break;
-        }
-        
-        session->input[session->inputPos++] = c;
-    }while(1);
-
-
-    if(session->input[cmdLen] != ' ') 
-        return false;
-    char* nl = strchr(session->input, '\n');
-    if(nl == NULL)
-        return false;
-    char* filenameStart = &session->input[cmdLen+1];
-    strncpy(session->filename, filenameStart, nl - filenameStart);
-    session->filename[filenameStart - nl] = '\0';
-
-    printf("filename: %s\n", session->filename);
-
-    return true;
-
-}
 
 bool TryParse(Session* session, char* cmd, bool hasFilename) {
     size_t cmdLen = strlen(cmd);
@@ -153,8 +123,8 @@ bool TryParse(Session* session, char* cmd, bool hasFilename) {
             return false;
         char* filenameStart = &session->input[cmdLen+1];
         strncpy(session->filename, filenameStart, nl - filenameStart);
-        session->filename[filenameStart - nl] = '\0';
-
+        session->filename[nl - filenameStart] = '\0';
+        printf("Fname: %s, nullidx: %ld\n", session->filename, nl - filenameStart);
     }
         
     return true;
@@ -328,12 +298,17 @@ void session_start_put(Session* session, size_t cmdLen) {
         
         size_t head_size = cmdLen + strlen(session->filename) + 2; // "PUT abc.png\n"
     
-        if(session->inputPos > head_size + 8) {
+        if(session->inputPos >= head_size + 8) {
             memcpy(&session->totalBytesForPut, &session->input[head_size], sizeof(size_t));
 
             size_t nowSendingBytes = session->inputPos - head_size - 8;
         
             if(nowSendingBytes > 0) {
+                int i;
+                for(i=0; i<(int)nowSendingBytes; i++) {
+                    if(session->input[head_size + 8 + i] != session->stream.buffer[i+head_size+8])
+                        printf("DDFF: %c,%c, %zu\n", session->input[head_size + 8 + i], session->stream.buffer[i+head_size+8], i+head_size+8);
+                }
                 write_all(session->fd, &session->input[head_size + 8], nowSendingBytes);
                 session->totalsent = nowSendingBytes;
             }
@@ -504,7 +479,6 @@ void write_all(FILE* f, char* buffer, size_t size) {
             printf("Output write failed\n");
             return;
         }
-        printf("%zu\n", count);
         bytes_sent += count;
     } while (bytes_sent < size);
 }
