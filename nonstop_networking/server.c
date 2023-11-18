@@ -12,6 +12,9 @@
 #include <fcntl.h>
 #include <sys/epoll.h>
 #include <pthread.h>
+#include <signal.h>
+#include <sys/time.h>
+#include <sys/resource.h>
 
 #include "common.h"
 #include "format.h"
@@ -84,6 +87,12 @@ static vector* directory;
 static my_hash_table_t sock_to_session_hashtable;
 static pthread_mutex_t directory_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+static int main_pid = 0;
+static int is_fork = 0, dump_core = 0;
+
+static char *pid_file = "/var/run/nbnserver.pid";
+
+
 // Flush the rest of the write buffer to the socket, and clear it out, however, don't block. This can return STREAM_END, STREAM_PENDING, STREAM_ERROR or STREAM_OK
 int Stream_Send(Stream* stream);
 
@@ -98,7 +107,7 @@ bool Stream_has_more(Stream* stream);
 
 Session* Session_create(int sock);
 void session_start_list(Session *session);
-void session_start_get(Session* session, size_t cmdLen);
+void session_start_get(Session* session);
 void session_start_put(Session* session, size_t cmdLen);
 
 bool continue_reading_header(Session* session);
@@ -113,6 +122,93 @@ void insert_size_into_mem(char* pBuffer, size_t size);
 void send_all(char* buffer, size_t size, int sock);
 void write_all(FILE* f, char* buffer, size_t size);
 int remove_directory(const char *path);
+int set_sighandler(sighandler_t sig_usr);
+
+typedef void (*sighandler_t) (int);
+
+static void print_usage(const char* progname)
+{
+  printf(
+      "Syntax: %s port [<options>]\n"
+      "\n"
+      "where <options>: \n"
+      " -f : fork the process, run in background\n"
+      " -c : dump core\n"
+      "\n"
+      ,
+      progname
+      );
+}
+
+static int parse_args(int argc, char* argv[])
+{
+  int i;
+  for(i=2; i<argc; i++){
+
+    char* arg = argv[i];
+
+    if(!strcmp(arg, "-f")) {
+        is_fork = 1;
+    } else if(!strcmp(arg, "-c")) {
+        dump_core = 1;
+    } else if(!strcmp(arg, "-h")) {
+        print_usage(argv[0]);
+        return -1;
+    } else {
+        printf("%s: unknown parameter '%s'\n",argv[0],arg);
+        print_usage(argv[0]);
+        return -1;
+    }
+  }
+  return 0;
+}
+
+static void sig_usr_un(int signo)
+{
+  if (signo == SIGCHLD || signo == SIGPIPE)
+    return;
+
+  printf("nbnserver: Signal %d received.\n", signo);
+    
+  if (!main_pid || (main_pid == getpid())) {
+    remove_directory(base_temp_dir);
+    if (pid_file) unlink(pid_file);
+    printf("nbnserver: Finished.\n");
+    exit(0);
+  }
+
+  return;
+}
+
+int set_sighandler(sighandler_t sig_usr)
+{
+  if (signal(SIGINT, sig_usr) == SIG_ERR ) {
+    printf("No SIGINT signal handler can be installed.\n");
+    return -1;
+  }
+    
+  if (signal(SIGPIPE, sig_usr) == SIG_ERR ) {
+    printf("No SIGPIPE signal handler can be installed.\n");
+    return -1;
+  }
+
+  if (signal(SIGCHLD , sig_usr)  == SIG_ERR ) {
+    printf("No SIGCHLD signal handler can be installed.\n");
+    return -1;
+  }
+
+  if (signal(SIGTERM , sig_usr)  == SIG_ERR ) {
+    printf("No SIGTERM signal handler can be installed.\n");
+    return -1;
+  }
+
+  if (signal(SIGHUP , sig_usr)  == SIG_ERR ) {
+    printf("No SIGHUP signal handler can be installed.\n");
+    return -1;
+  }
+
+  return 0;
+}
 
 int remove_directory(const char *path) {
    DIR *d = opendir(path);
@@ -214,7 +310,7 @@ bool continue_reading_header(Session* session) {
     if(TryParse(session, "LIST", false))
         session_start_list(session);
     else if(TryParse(session, "GET", true))
-        session_start_get(session, 3);
+        session_start_get(session);
     else if(TryParse(session, "PUT", true))
         session_start_put(session, 3);
     else if(TryParse(session, "DELETE", true))
@@ -261,14 +357,14 @@ int Stream_GetNext(Stream* stream) {
 
 // Write next character to buffer, and flush to stream if buffer is full. This can return STREAM_END, STREAM_PENDING, or STREAM_ERROR
 int Stream_WriteNext(Stream* stream, char c) {
-	assert(! stream->atEnd && ! stream->inError); // Shouldn't be called when the stream is no longer viable
-	if(stream->position == BUFSIZ) {
-		int result = 0;// = Stream_SendUntilBlock(stream);
-		if(result != STREAM_OK)
-			return result;
-		assert(stream->position = 0);
-		stream->buffer[stream->position++] = c;
-	}
+    assert(! stream->atEnd && ! stream->inError); // Shouldn't be called when the stream is no longer viable
+    if(stream->position == BUFSIZ) {
+        int result = 0;// = Stream_SendUntilBlock(stream);
+        if(result != STREAM_OK)
+            return result;
+        assert(stream->position = 0);
+        stream->buffer[stream->position++] = c;
+    }
     return STREAM_END;
 }
 
@@ -378,7 +474,7 @@ void session_start_list(Session *session)
 
 }
 
-void session_start_get(Session* session, size_t cmdLen) {
+void session_start_get(Session* session) {
     pthread_t exec_thr=(pthread_t)NULL;
     pthread_attr_t attr;
 
@@ -722,6 +818,8 @@ static void initialize()
         print_error_message("mkdtemp faild");
         exit(EXIT_FAILURE);
     }
+    print_temp_directory(tmp_dir);
+    
     snprintf(base_temp_dir, sizeof(base_temp_dir), "%s", tmp_dir);
 
     hashtable_ts_init(&sock_to_session_hashtable, NULL, "sock_to_session_hashtable");
@@ -730,7 +828,7 @@ static void initialize()
 }
 
 int main(int argc, char **argv) {
-    if(argc != 2) {
+    if(argc < 2) {
         printf("Usage: %s portnum", argv[0]);
         exit(-1);
     }
@@ -739,6 +837,69 @@ int main(int argc, char **argv) {
         printf("Usage: %s portnum", argv[0]);
         exit(-1);
     }
+
+    int p;
+    int pid;
+    FILE *pid_stream;
+        
+    if(parse_args(argc, argv))
+        return -1;
+    
+    if (dump_core) {
+        struct rlimit l;
+        memset(&l, 0, sizeof(l));
+        l.rlim_cur = RLIM_INFINITY;
+        l.rlim_max = RLIM_INFINITY;
+        chdir("/");
+        if (setrlimit(RLIMIT_CORE, &l)) {
+            printf("Unable to disable core size resource limit: %s\n", strerror(errno));
+        }
+    }
+
+    if(is_fork) {
+        if ((pid=fork())<0){
+          printf("Cannot fork: %s.\n", strerror(errno));
+          return -1;
+        }else if (pid!=0){
+          /* parent process => exit*/
+          return 0;
+        }
+    }
+    
+    /* added by noh: create a pid file for the main process */
+    if (pid_file!=0){
+        
+        if ((pid_stream=fopen(pid_file, "r"))!=NULL){
+            fscanf(pid_stream, "%d", &p);
+            fclose(pid_stream);
+            if (p==-1){
+                printf("pid file %s exists, but doesn't contain a valid"
+                    " pid number\n", pid_file);
+                return -1;
+            }
+            if (kill((pid_t)p, 0)==0 || errno==EPERM){
+                printf("running process found in the pid file %s\n",
+                    pid_file);
+                return -1;
+            }else{
+                printf("pid file contains old pid, replacing pid\n");
+            }
+        }
+        pid=getpid();
+        if ((pid_stream=fopen(pid_file, "w"))==NULL){
+            printf("unable to create pid file %s: %s\n", 
+                pid_file, strerror(errno));
+            return -1;
+        }else{
+            fprintf(pid_stream, "%i\n", (int)pid);
+            fclose(pid_stream);
+        }
+    }
+
+    main_pid = getpid();
+    
+    if(set_sighandler(sig_usr_un))
+            return -1;
 
     int efd;
     struct epoll_event event;
