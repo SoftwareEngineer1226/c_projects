@@ -404,28 +404,30 @@ void session_start_delete(Session *session)
 {
     int result = 0;
     char fullpath[BUFSIZ];
-    pthread_mutex_lock(&directory_mutex);
-        for(size_t i=0; i < vector_size(directory); i++) {
-            char *diritem = vector_get(directory, i);
-            if( !strcmp(session->filename, diritem) ) {
-                snprintf(fullpath, sizeof(fullpath), "%s/%s", base_temp_dir, session->filename);
-                free(diritem);
-                vector_erase(directory, i); 
-                break;
+
+    if(strlen(session->filename)) {
+        pthread_mutex_lock(&directory_mutex);
+            for(size_t i=0; i < vector_size(directory); i++) {
+                char *diritem = vector_get(directory, i);
+                if( !strcmp(session->filename, diritem) ) {
+                    snprintf(fullpath, sizeof(fullpath), "%s/%s", base_temp_dir, session->filename);
+                    free(diritem);
+                    vector_erase(directory, i); 
+                    break;
+                }
             }
+        pthread_mutex_unlock(&directory_mutex);
+        
+        char buffer[BUFSIZ];
+        result = unlink(fullpath);
+        if(result == 0) {
+            sprintf(buffer, "OK\n");
+            send_all(buffer, strlen(buffer), session->stream.socket);
+        } else {
+            sprintf(buffer, "ERROR\n%s\n", strerror(errno));
+            send_all(buffer, strlen(buffer), session->stream.socket);
         }
-    pthread_mutex_unlock(&directory_mutex);
-    
-    char buffer[BUFSIZ];
-    result = unlink(fullpath);
-    if(result == 0) {
-        sprintf(buffer, "OK\n");
-        send_all(buffer, strlen(buffer), session->stream.socket);
-    } else {
-        sprintf(buffer, "ERROR\n%s\n", strerror(errno));
-        send_all(buffer, strlen(buffer), session->stream.socket);
     }
-    
 }
 
 void session_start_list(Session *session)
@@ -470,39 +472,35 @@ void session_start_list(Session *session)
 }
 
 void session_start_get(Session* session) {
-    pthread_t exec_thr=(pthread_t)NULL;
-    pthread_attr_t attr;
-
-    session->state = STATE_SENDING_GET;
-
-    pthread_attr_init(&attr);
-    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-    if(pthread_create(&exec_thr, &attr, sending_get_thread, session)) {
-        print_error_message("pthread_create failed.\n");
+    if(strlen(session->filename)) {
+        session->state = STATE_SENDING_GET;
+        sending_get_thread(session);
     }
-    pthread_attr_destroy(&attr);
 }
 
 void session_start_put(Session* session, size_t cmdLen) {
 
     if(strlen(session->filename)) { // got filename, but didn't get filesize
         LOG("Server put for %s\n", session->filename);
-
-        char buffer[BUFSIZ];
-        snprintf(buffer, sizeof(buffer), "%s/%s", base_temp_dir, session->filename);
-        session->fd = fopen(buffer, "wb");
-        if(session->fd == NULL) {
-            sprintf(buffer, "ERROR\n%s\n", strerror(errno));
-            send_all(buffer, strlen(buffer), session->stream.socket);
-            session->state = STATE_INTERNAL_ERROR;
-            session->status = STATUS_SESSION_ERROR;
-            return;
-        }
         
         size_t head_size = cmdLen + strlen(session->filename) + 2; // "PUT abc.png\n"
     
         if(session->inputPos >= head_size + 8) {
+            char buffer[BUFSIZ];
+            snprintf(buffer, sizeof(buffer), "%s/%s", base_temp_dir, session->filename);
+            session->fd = fopen(buffer, "wb");
+            if(session->fd == NULL) {
+                sprintf(buffer, "ERROR\n%s\n", strerror(errno));
+                send_all(buffer, strlen(buffer), session->stream.socket);
+                session->state = STATE_INTERNAL_ERROR;
+                session->status = STATUS_SESSION_ERROR;
+                fclose(session->fd);
+                return;
+            }
+            
             memcpy(&session->totalBytesForPut, &session->input[head_size], sizeof(size_t));
+
+            printf("totalBytesForPut: %zu\n", session->totalBytesForPut);
 
             size_t nowSendingBytes = session->inputPos - head_size - 8;
         
