@@ -168,12 +168,12 @@ static void sig_usr_un(int signo)
   if (signo == SIGCHLD || signo == SIGPIPE)
     return;
 
-  printf("nbnserver: Signal %d received.\n", signo);
+  LOG("nbnserver: Signal %d received.\n", signo);
     
   if (!main_pid || (main_pid == getpid())) {
     remove_directory(base_temp_dir);
     if (pid_file) unlink(pid_file);
-    printf("nbnserver: Finished.\n");
+    LOG("nbnserver: Finished.\n");
     exit(0);
   }
 
@@ -183,27 +183,27 @@ static void sig_usr_un(int signo)
 int set_sighandler(sighandler_t sig_usr)
 {
   if (signal(SIGINT, sig_usr) == SIG_ERR ) {
-    printf("No SIGINT signal handler can be installed.\n");
+    LOG("No SIGINT signal handler can be installed.\n");
     return -1;
   }
     
   if (signal(SIGPIPE, sig_usr) == SIG_ERR ) {
-    printf("No SIGPIPE signal handler can be installed.\n");
+    LOG("No SIGPIPE signal handler can be installed.\n");
     return -1;
   }
 
   if (signal(SIGCHLD , sig_usr)  == SIG_ERR ) {
-    printf("No SIGCHLD signal handler can be installed.\n");
+    LOG("No SIGCHLD signal handler can be installed.\n");
     return -1;
   }
 
   if (signal(SIGTERM , sig_usr)  == SIG_ERR ) {
-    printf("No SIGTERM signal handler can be installed.\n");
+    LOG("No SIGTERM signal handler can be installed.\n");
     return -1;
   }
 
   if (signal(SIGHUP , sig_usr)  == SIG_ERR ) {
-    printf("No SIGHUP signal handler can be installed.\n");
+    LOG("No SIGHUP signal handler can be installed.\n");
     return -1;
   }
 
@@ -374,7 +374,7 @@ static void* sending_get_thread(void *data) {
     char *filename = session->filename;
     int sock = session->stream.socket;
     
-    printf("Server get for %s\n", filename);
+    LOG("Server get for %s\n", filename);
     char buffer[BUFSIZ];
     snprintf(buffer, sizeof(buffer), "%s/%s", base_temp_dir, filename);
     struct stat file_info;
@@ -400,7 +400,7 @@ static void* sending_get_thread(void *data) {
             return NULL;
         }
         if(count == 0) {
-            printf("Client terminated early\n");
+            LOG("Client terminated early\n");
             fclose(f);
             return NULL;
         }
@@ -483,7 +483,7 @@ void session_start_get(Session* session) {
     pthread_attr_init(&attr);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
     if(pthread_create(&exec_thr, &attr, sending_get_thread, session)) {
-        printf("pthread_create failed.\n");
+        LOG("pthread_create failed.\n");
     }
     pthread_attr_destroy(&attr);
 }
@@ -491,13 +491,14 @@ void session_start_get(Session* session) {
 void session_start_put(Session* session, size_t cmdLen) {
 
     if(strlen(session->filename)) { // got filename, but didn't get filesize
-        printf("Server put for %s\n", session->filename);
+        LOG("Server put for %s\n", session->filename);
 
         char buffer[BUFSIZ];
         snprintf(buffer, sizeof(buffer), "%s/%s", base_temp_dir, session->filename);
         session->fd = fopen(buffer, "wb");
         if(session->fd == NULL) {
             sprintf(buffer, "ERROR\n%s\n", strerror(errno));
+            send_all(buffer, strlen(buffer), session->stream.socket);
             session->state = STATE_INTERNAL_ERROR;
             session->status = STATUS_SESSION_ERROR;
             return;
@@ -524,7 +525,6 @@ void session_start_put(Session* session, size_t cmdLen) {
                 pthread_mutex_lock(&directory_mutex);
                 vector_push_back(directory, strdup(session->filename));
                 pthread_mutex_unlock(&directory_mutex);
-                
             } else {
                 session->state = STATE_READING_PUT;
             }
@@ -663,7 +663,7 @@ void send_all(char* buffer, size_t size, int sock) {
             return;
         }
         if(count == 0) {
-            printf("Client disconnected\n");
+            LOG("Client disconnected\n");
             return;
         }
         bytes_sent += count;
@@ -680,7 +680,7 @@ void write_all(FILE* f, char* buffer, size_t size) {
             return;
         }
         if(count == 0) {
-            printf("Output write failed\n");
+            LOG("Output write failed\n");
             return;
         }
         bytes_sent += count;
