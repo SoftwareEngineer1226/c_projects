@@ -79,9 +79,10 @@ typedef struct {
     size_t totalsent;
 } Session;
 
-
+static char base_temp_dir[BUFSIZ];
+static vector* directory;
 static my_hash_table_t sock_to_session_hashtable;
-
+static pthread_mutex_t directory_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // Flush the rest of the write buffer to the socket, and clear it out, however, don't block. This can return STREAM_END, STREAM_PENDING, STREAM_ERROR or STREAM_OK
 int Stream_Send(Stream* stream);
@@ -96,12 +97,14 @@ void Stream_Reset(Stream* stream, int socket);
 bool Stream_has_more(Stream* stream);
 
 Session* Session_create(int sock);
+void session_start_list(Session *session);
 void session_start_get(Session* session, size_t cmdLen);
 void session_start_put(Session* session, size_t cmdLen);
 
 bool continue_reading_header(Session* session);
 bool continue_sending_get(Session* session);
 bool continue_reading_put(Session* session);
+void session_start_delete(Session *session);
 bool TryParse(Session* session, char* cmd, bool hasFilename);
 int Session_processNext(Session* session);
 void write_short_string(Session* session, char* str);
@@ -109,6 +112,51 @@ void write_short_string(Session* session, char* str);
 void insert_size_into_mem(char* pBuffer, size_t size);
 void send_all(char* buffer, size_t size, int sock);
 void write_all(FILE* f, char* buffer, size_t size);
+int remove_directory(const char *path);
+
+int remove_directory(const char *path) {
+   DIR *d = opendir(path);
+   size_t path_len = strlen(path);
+   int r = -1;
+
+   if (d) {
+      struct dirent *p;
+
+      r = 0;
+      while (!r && (p=readdir(d))) {
+          int r2 = -1;
+          char *buf;
+          size_t len;
+
+          /* Skip the names "." and ".." as we don't want to recurse on them. */
+          if (!strcmp(p->d_name, ".") || !strcmp(p->d_name, ".."))
+             continue;
+
+          len = path_len + strlen(p->d_name) + 2; 
+          buf = malloc(len);
+
+          if (buf) {
+             struct stat statbuf;
+
+             snprintf(buf, len, "%s/%s", path, p->d_name);
+             if (!stat(buf, &statbuf)) {
+                if (S_ISDIR(statbuf.st_mode))
+                   r2 = remove_directory(buf);
+                else
+                   r2 = unlink(buf);
+             }
+             free(buf);
+          }
+          r = r2;
+      }
+      closedir(d);
+   }
+
+   if (!r)
+      r = rmdir(path);
+
+   return r;
+}
 
 bool TryParse(Session* session, char* cmd, bool hasFilename) {
     size_t cmdLen = strlen(cmd);
@@ -124,7 +172,6 @@ bool TryParse(Session* session, char* cmd, bool hasFilename) {
         char* filenameStart = &session->input[cmdLen+1];
         strncpy(session->filename, filenameStart, nl - filenameStart);
         session->filename[nl - filenameStart] = '\0';
-        printf("Fname: %s, nullidx: %ld\n", session->filename, nl - filenameStart);
     }
         
     return true;
@@ -165,13 +212,13 @@ bool continue_reading_header(Session* session) {
     } while(session->state == STATE_READING_HEADER);
 
     if(TryParse(session, "LIST", false))
-        ;//session_start_list(session);
+        session_start_list(session);
     else if(TryParse(session, "GET", true))
         session_start_get(session, 3);
     else if(TryParse(session, "PUT", true))
         session_start_put(session, 3);
     else if(TryParse(session, "DELETE", true))
-        ;//session_start_delete(session));
+        session_start_delete(session);
     
     return false;//Session_has_more(&session->stream);
 }
@@ -187,6 +234,9 @@ bool continue_reading_put(Session* session)
         sprintf(buffer, "OK\n");
         send_all(buffer, strlen(buffer), session->stream.socket);
         session->state = STATE_DONE;
+        pthread_mutex_lock(&directory_mutex);
+        vector_push_back(directory, strdup(session->filename));
+        pthread_mutex_unlock(&directory_mutex);
     }
     return false;
 }
@@ -230,7 +280,7 @@ static void* sending_get_thread(void *data) {
     
     printf("Server get for %s\n", filename);
     char buffer[BUFSIZ];
-    sprintf(buffer, "%s/%s", BASE_FOLDER, filename);
+    snprintf(buffer, sizeof(buffer), "%s/%s", base_temp_dir, filename);
     struct stat file_info;
     stat(buffer, &file_info);
     FILE* f = fopen(buffer, "rb");
@@ -266,6 +316,68 @@ static void* sending_get_thread(void *data) {
     return NULL;
 }
 
+void session_start_delete(Session *session)
+{
+    pthread_mutex_lock(&directory_mutex);
+        for(size_t i=0; i < vector_size(directory); i++) {
+            char *diritem = vector_get(directory, i);
+            if( !strcmp(session->filename, diritem) ) {
+                char fullpath[BUFSIZ];
+                snprintf(fullpath, sizeof(fullpath), "%s/%s", base_temp_dir, session->filename);
+                unlink(fullpath);
+                free(diritem);
+                vector_erase(directory, i); 
+            }
+        }
+    pthread_mutex_unlock(&directory_mutex);
+    
+    char buffer[BUFSIZ];
+    sprintf(buffer, "OK\n");
+    send_all(buffer, strlen(buffer), session->stream.socket);
+    
+}
+
+void session_start_list(Session *session)
+{
+    char buffer[BUFSIZ];
+    
+    // Note we assume there is a vector called directory storing the directory of all files in the temp folder
+    // We do this as per instructions rather than reading the filesystem directly.
+    size_t sizeCount = 0;
+    pthread_mutex_lock(&directory_mutex);
+    VECTOR_FOR_EACH(directory, diritem, {
+        sizeCount += strlen(diritem) + 1; // +1 for the newline
+    });
+    pthread_mutex_unlock(&directory_mutex);
+    sizeCount++; // Add one for the end null character;
+    session->listData = malloc(sizeCount);
+    if(session->listData == NULL) {
+        print_error_message("malloc failed");
+        return;
+    }
+    
+    char* end = session->listData;
+    pthread_mutex_lock(&directory_mutex);
+    VECTOR_FOR_EACH(directory, diritem, {
+        size_t len = strlen((char*)diritem);
+        strcpy(end, diritem);
+        end[len] = '\n';
+        end += len + 1;
+    });
+    pthread_mutex_unlock(&directory_mutex);
+    *end = '\0';
+
+    // Set up the header
+    strcpy(buffer, "OK\n12345678"); // Note we will overwrite 12345678 with a size_t
+    char *pBuffer = buffer + strlen(buffer);
+    insert_size_into_mem(&buffer[3], sizeCount);
+    send_all(buffer, pBuffer - buffer, session->stream.socket);
+    send_all(session->listData, sizeCount, session->stream.socket);
+    free(session->listData);
+    session->state = STATE_WRITING_LIST;
+
+}
+
 void session_start_get(Session* session, size_t cmdLen) {
     pthread_t exec_thr=(pthread_t)NULL;
     pthread_attr_t attr;
@@ -286,8 +398,7 @@ void session_start_put(Session* session, size_t cmdLen) {
         printf("Server put for %s\n", session->filename);
 
         char buffer[BUFSIZ];
-
-        sprintf(buffer, "%s/%s", BASE_FOLDER, session->filename);
+        snprintf(buffer, sizeof(buffer), "%s/%s", base_temp_dir, session->filename);
         session->fd = fopen(buffer, "wb");
         if(session->fd == NULL) {
             sprintf(buffer, "ERROR\n%s\n", strerror(errno));
@@ -304,11 +415,6 @@ void session_start_put(Session* session, size_t cmdLen) {
             size_t nowSendingBytes = session->inputPos - head_size - 8;
         
             if(nowSendingBytes > 0) {
-                int i;
-                for(i=0; i<(int)nowSendingBytes; i++) {
-                    if(session->input[head_size + 8 + i] != session->stream.buffer[i+head_size+8])
-                        printf("DDFF: %c,%c, %zu\n", session->input[head_size + 8 + i], session->stream.buffer[i+head_size+8], i+head_size+8);
-                }
                 write_all(session->fd, &session->input[head_size + 8], nowSendingBytes);
                 session->totalsent = nowSendingBytes;
             }
@@ -317,9 +423,12 @@ void session_start_put(Session* session, size_t cmdLen) {
                 char buffer[BUFSIZ];
                 fclose(session->fd);
                 sprintf(buffer, "OK\n");
-                printf("((%s))\n", buffer);
                 send_all(buffer, strlen(buffer), session->stream.socket);
                 session->state = STATE_DONE;
+                pthread_mutex_lock(&directory_mutex);
+                vector_push_back(directory, strdup(session->filename));
+                pthread_mutex_unlock(&directory_mutex);
+                
             } else {
                 session->state = STATE_READING_PUT;
             }
@@ -344,7 +453,6 @@ Session* Session_create(int sock) {
     session->listData = NULL;
     session->listDataPos = 0;
     session->reading = true;
-    
     return session;
 }
 
@@ -605,6 +713,21 @@ void perform_delete(char* filename, int sock) {
     }
 }
 
+static void initialize()
+{
+    char base_path[] = "/tmp/nbn_tmpdir.XXXXXX";
+
+    char *tmp_dir = mkdtemp(base_path);
+    if(tmp_dir == NULL) {
+        print_error_message("mkdtemp faild");
+        exit(EXIT_FAILURE);
+    }
+    snprintf(base_temp_dir, sizeof(base_temp_dir), "%s", tmp_dir);
+
+    hashtable_ts_init(&sock_to_session_hashtable, NULL, "sock_to_session_hashtable");
+
+    directory = vector_create(NULL, NULL, NULL);
+}
 
 int main(int argc, char **argv) {
     if(argc != 2) {
@@ -628,7 +751,7 @@ int main(int argc, char **argv) {
     //char buffer[BUFSIZ];
     //int bytesRead;
 
-    hashtable_ts_init(&sock_to_session_hashtable, NULL, "sock_to_session_hashtable");
+    initialize();
 
     server_fd = create_and_bind (portNum);
     if (server_fd == -1)
