@@ -87,12 +87,6 @@ static vector* directory;
 static my_hash_table_t sock_to_session_hashtable;
 static pthread_mutex_t directory_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-static int main_pid = 0;
-static int is_fork = 0, dump_core = 0;
-
-static char *pid_file = "/var/run/nbnserver.pid";
-
-
 // Flush the rest of the write buffer to the socket, and clear it out, however, don't block. This can return STREAM_END, STREAM_PENDING, STREAM_ERROR or STREAM_OK
 int Stream_Send(Stream* stream);
 
@@ -123,44 +117,18 @@ void send_all(char* buffer, size_t size, int sock);
 void write_all(FILE* f, char* buffer, size_t size);
 int remove_directory(const char *path);
 int set_sighandler(sighandler_t sig_usr);
+int exist_in_vector(vector* vector, char *filename);
 
 typedef void (*sighandler_t) (int);
 
 static void print_usage(const char* progname)
 {
   printf(
-      "Syntax: %s port [<options>]\n"
-      "\n"
-      "where <options>: \n"
-      " -f : fork the process, run in background\n"
-      " -c : dump core\n"
+      "Usage: %s <port>\n"
       "\n"
       ,
       progname
       );
-}
-
-static int parse_args(int argc, char* argv[])
-{
-  int i;
-  for(i=2; i<argc; i++){
-
-    char* arg = argv[i];
-
-    if(!strcmp(arg, "-f")) {
-        is_fork = 1;
-    } else if(!strcmp(arg, "-c")) {
-        dump_core = 1;
-    } else if(!strcmp(arg, "-h")) {
-        print_usage(argv[0]);
-        return -1;
-    } else {
-        printf("%s: unknown parameter '%s'\n",argv[0],arg);
-        print_usage(argv[0]);
-        return -1;
-    }
-  }
-  return 0;
 }
 
 static void sig_usr_un(int signo)
@@ -169,13 +137,10 @@ static void sig_usr_un(int signo)
     return;
 
   LOG("nbnserver: Signal %d received.\n", signo);
-    
-  if (!main_pid || (main_pid == getpid())) {
-    remove_directory(base_temp_dir);
-    if (pid_file) unlink(pid_file);
-    LOG("nbnserver: Finished.\n");
-    exit(0);
-  }
+  
+  remove_directory(base_temp_dir);
+  LOG("nbnserver: Finished.\n");
+  exit(0);
 
   return;
 }
@@ -209,6 +174,21 @@ int set_sighandler(sighandler_t sig_usr)
 
   return 0;
 }
+
+int exist_in_vector(vector* vector, char *data)
+{
+    int ret = 0;
+    pthread_mutex_lock(&directory_mutex);
+    VECTOR_FOR_EACH(vector, item, {
+        if(!strcmp(data, item)) {
+            ret = 1;
+            break;
+        }
+    });
+    pthread_mutex_unlock(&directory_mutex);
+    return ret;
+}
+
 
 int remove_directory(const char *path) {
    DIR *d = opendir(path);
@@ -319,20 +299,28 @@ bool continue_reading_header(Session* session) {
     return false;//Session_has_more(&session->stream);
 }
 
+static void send_response_for_put(Session* session)
+{
+    char buffer[BUFSIZ];
+    int exist = exist_in_vector(directory, session->filename);
+    fclose(session->fd);
+    sprintf(buffer, "OK\n");
+    send_all(buffer, strlen(buffer), session->stream.socket);
+    session->state = STATE_DONE;
+    if(!exist) {
+        pthread_mutex_lock(&directory_mutex);
+        vector_push_back(directory, strdup(session->filename));
+        pthread_mutex_unlock(&directory_mutex);
+    }
+}
+
 bool continue_reading_put(Session* session)
 {
     write_all(session->fd, session->stream.buffer, session->stream.bytesInBuffer);
     session->totalsent += session->stream.bytesInBuffer;
 
     if(session->totalsent >= session->totalBytesForPut) {
-        char buffer[BUFSIZ];
-        fclose(session->fd);
-        sprintf(buffer, "OK\n");
-        send_all(buffer, strlen(buffer), session->stream.socket);
-        session->state = STATE_DONE;
-        pthread_mutex_lock(&directory_mutex);
-        vector_push_back(directory, strdup(session->filename));
-        pthread_mutex_unlock(&directory_mutex);
+        send_response_for_put(session);
     }
     return false;
 }
@@ -414,22 +402,29 @@ static void* sending_get_thread(void *data) {
 
 void session_start_delete(Session *session)
 {
+    int result = 0;
+    char fullpath[BUFSIZ];
     pthread_mutex_lock(&directory_mutex);
         for(size_t i=0; i < vector_size(directory); i++) {
             char *diritem = vector_get(directory, i);
             if( !strcmp(session->filename, diritem) ) {
-                char fullpath[BUFSIZ];
                 snprintf(fullpath, sizeof(fullpath), "%s/%s", base_temp_dir, session->filename);
-                unlink(fullpath);
                 free(diritem);
                 vector_erase(directory, i); 
+                break;
             }
         }
     pthread_mutex_unlock(&directory_mutex);
     
     char buffer[BUFSIZ];
-    sprintf(buffer, "OK\n");
-    send_all(buffer, strlen(buffer), session->stream.socket);
+    result = unlink(fullpath);
+    if(result == 0) {
+        sprintf(buffer, "OK\n");
+        send_all(buffer, strlen(buffer), session->stream.socket);
+    } else {
+        sprintf(buffer, "ERROR\n%s\n", strerror(errno));
+        send_all(buffer, strlen(buffer), session->stream.socket);
+    }
     
 }
 
@@ -517,14 +512,7 @@ void session_start_put(Session* session, size_t cmdLen) {
             }
 
             if(session->totalsent >= session->totalBytesForPut) { // for short content
-                char buffer[BUFSIZ];
-                fclose(session->fd);
-                sprintf(buffer, "OK\n");
-                send_all(buffer, strlen(buffer), session->stream.socket);
-                session->state = STATE_DONE;
-                pthread_mutex_lock(&directory_mutex);
-                vector_push_back(directory, strdup(session->filename));
-                pthread_mutex_unlock(&directory_mutex);
+                send_response_for_put(session);
             } else {
                 session->state = STATE_READING_PUT;
             }
@@ -691,124 +679,6 @@ void insert_size_into_mem(char* pBuffer, size_t size) {
     memcpy(pBuffer, &size, sizeof(size_t));
 }
 
-void perform_get(char* filename, int sock) {
-    printf("Server get for %s\n", filename);
-    char buffer[BUFSIZ];
-    sprintf(buffer, "%s/%s", BASE_FOLDER, filename);
-    struct stat file_info;
-    stat(buffer, &file_info);
-    FILE* f = fopen(buffer, "rb");
-    if(f == NULL) {
-        sprintf(buffer, "ERROR\nUnknown file\n");
-        send_all(buffer, strlen(buffer), sock);
-        return;
-    }
-    // Set up the header
-    strcpy(buffer, "OK\n12345678"); // Note we will overwrite 12345678 with a size_t
-    char *pBuffer = buffer + strlen(buffer);
-    insert_size_into_mem(&buffer[3], file_info.st_size);
-    send_all(buffer, pBuffer - buffer, sock);
-    size_t bytes_read = 0;
-    do
-    {
-        int count = fread(buffer, 1, BUFSIZ, f);
-        if(count < 0) {
-            perror("Get failed");
-            fclose(f);
-            return;
-        }
-        if(count == 0) {
-            printf("Client terminated early\n");
-            fclose(f);
-            return;
-        }
-        bytes_read += count;
-        send_all(buffer, count, sock);
-    } while (bytes_read < (size_t)file_info.st_size);
-    fclose(f);
-}
-
-void perform_put(char* filename, size_t bytes_left, char* fileDataStart, int sock) {
-    printf("Server put for %s\n", filename);
-    // Put is tricky since we have already read some of the bytes in the file into the buffer in the initial read.
-    // Plus we need to get the bytes containing the size.
-
-    // We will use this buffer for a few things.
-    char buffer[BUFSIZ];
-
-    // Read the size
-    size_t size;
-    read(sock, (char*)(&size), sizeof(size_t));
-
-    // Now open the output file
-    sprintf(buffer, "%s/%s", BASE_FOLDER, filename);
-    FILE* f = fopen(buffer, "wb");
-    if(f == NULL) {
-        sprintf(buffer, "ERROR\n%s\n", strerror(errno));
-        return;
-    }
-    size_t total_sent = 0;
-
-    while(total_sent < size) {
-        int count = read(sock, buffer, BUFSIZ);
-        if(count == -1) {
-            perror("read failed");
-            fclose(f);
-            return;
-        }
-        if(count == 0) {
-            printf("Client sent too few bytes\n");
-            fclose(f);
-            return;
-        }
-        write_all(f, buffer, count);
-        total_sent += count;
-    }
-    fclose(f);
-    sprintf(buffer, "OK\n");
-    send_all(buffer, strlen(buffer), sock);
-}
-
-void perform_list(int sock) {
-    printf("Server list\n");
-    char buffer[BUFSIZ];
-    strcpy(buffer, "OK\n12345678"); // Note we will overwrite 12345678 with a size_t
-    char *pBuffer = buffer + strlen(buffer);
-    size_t dataSize = 0;
-    DIR *d;
-    struct dirent *dir;
-    d = opendir(BASE_FOLDER);
-    if (d) {
-        while ((dir = readdir(d)) != NULL) {
-            char filename[BUFSIZ];
-            sprintf(filename, "%s\n", dir->d_name);
-            if(*filename == '.')
-                continue;
-            strcpy(pBuffer, filename);
-            size_t len = strlen(filename);
-            pBuffer += len;
-            dataSize += len;
-        }
-    }
-    closedir(d);
-    insert_size_into_mem(&buffer[3], dataSize);
-    send_all(buffer, pBuffer - buffer, sock);
-}
-
-void perform_delete(char* filename, int sock) {
-    printf("Server delete for %s\n", filename);
-    char buffer[BUFSIZ];
-    sprintf(buffer, "%s/%s", BASE_FOLDER, filename);
-    int result = unlink(buffer);
-    if(result == 0) {
-        sprintf(buffer, "OK\n");
-        send_all(buffer, strlen(buffer), sock);
-    } else {
-        sprintf(buffer, "ERROR\n%s\n", strerror(errno));
-        send_all(buffer, strlen(buffer), sock);
-    }
-}
-
 static void initialize()
 {
     char base_path[] = "/tmp/nbn_tmpdir.XXXXXX";
@@ -828,89 +698,23 @@ static void initialize()
 }
 
 int main(int argc, char **argv) {
-    if(argc < 2) {
-        printf("Usage: %s portnum", argv[0]);
+    if(argc != 2) {
+        print_usage(argv[0]);
         exit(-1);
     }
     int portNum = atoi(argv[1]);
     if(portNum < 1024) {
-        printf("Usage: %s portnum", argv[0]);
+        print_usage(argv[0]);
         exit(-1);
     }
 
-    int p;
-    int pid;
-    FILE *pid_stream;
-        
-    if(parse_args(argc, argv))
-        return -1;
-    
-    if (dump_core) {
-        struct rlimit l;
-        memset(&l, 0, sizeof(l));
-        l.rlim_cur = RLIM_INFINITY;
-        l.rlim_max = RLIM_INFINITY;
-        chdir("/");
-        if (setrlimit(RLIMIT_CORE, &l)) {
-            printf("Unable to disable core size resource limit: %s\n", strerror(errno));
-        }
-    }
-
-    if(is_fork) {
-        if ((pid=fork())<0){
-          printf("Cannot fork: %s.\n", strerror(errno));
-          return -1;
-        }else if (pid!=0){
-          /* parent process => exit*/
-          return 0;
-        }
-    }
-    
-    /* added by noh: create a pid file for the main process */
-    if (pid_file!=0){
-        
-        if ((pid_stream=fopen(pid_file, "r"))!=NULL){
-            fscanf(pid_stream, "%d", &p);
-            fclose(pid_stream);
-            if (p==-1){
-                printf("pid file %s exists, but doesn't contain a valid"
-                    " pid number\n", pid_file);
-                return -1;
-            }
-            if (kill((pid_t)p, 0)==0 || errno==EPERM){
-                printf("running process found in the pid file %s\n",
-                    pid_file);
-                return -1;
-            }else{
-                printf("pid file contains old pid, replacing pid\n");
-            }
-        }
-        pid=getpid();
-        if ((pid_stream=fopen(pid_file, "w"))==NULL){
-            printf("unable to create pid file %s: %s\n", 
-                pid_file, strerror(errno));
-            return -1;
-        }else{
-            fprintf(pid_stream, "%i\n", (int)pid);
-            fclose(pid_stream);
-        }
-    }
-
-    main_pid = getpid();
-    
     if(set_sighandler(sig_usr_un))
             return -1;
 
     int efd;
     struct epoll_event event;
     struct epoll_event *events;
-  
     int server_fd, s;
-    //struct sockaddr_in address;
-    //int addrlen = sizeof(address);
-
-    //char buffer[BUFSIZ];
-    //int bytesRead;
 
     initialize();
 
@@ -1069,26 +873,6 @@ int main(int argc, char **argv) {
                     session->stream.bytesInBuffer = bytesRead;
 
                     Session_processNext(session);
-                    
-                    /*if(strncmp(buffer, "GET", strlen("GET")) == 0) {
-                        char* filename = &buffer[strlen("GET")+1];
-                        char* newline = strchr(filename, '\n');
-                        *newline = '\0';
-                        perform_get(filename, events[i].data.fd);
-                    } else if(strncmp(buffer, "PUT", strlen("PUT")) == 0) {
-                        char* filename = &buffer[strlen("PUT")+1];
-                        char* newline = strchr(filename, '\n');
-                        *newline = '\0';
-                        size_t bytes_used_so_far = (newline+1) - buffer;
-                        perform_put(filename, bytesRead - bytes_used_so_far, newline+1, events[i].data.fd);
-                    } else if(strncmp(buffer, "LIST", 4) == 0) {
-                        perform_list(events[i].data.fd);
-                    } else if(strncmp(buffer, "DELETE", strlen("DELETE")) == 0) {
-                        char* filename = &buffer[strlen("DELETE")+1];
-                        char* newline = strchr(filename, '\n');
-                        *newline = '\0';
-                        perform_delete(filename, events[i].data.fd);
-                    }*/
 
                     /* Write the buffer to standard output */
                     /*s = write (1, buffer, bytesRead);
@@ -1118,42 +902,6 @@ int main(int argc, char **argv) {
 
     close (server_fd);
 
-
-#if 0
-    while(1) {
-        // Accepting the incoming connection
-        if ((sock = accept(server_fd, (struct sockaddr *)&address, (socklen_t *)&addrlen)) < 0) {
-            print_error_message("Accept failed");
-            exit(EXIT_FAILURE);
-        }
-        bytesRead = recv(sock, buffer, BUFSIZ, 0);
-        if (bytesRead < 0) {
-            perror("Error receiving data");
-            exit(EXIT_FAILURE);
-        }
-
-        if(strncmp(buffer, "GET", strlen("GET")) == 0) {
-            char* filename = &buffer[strlen("GET")+1];
-            char* newline = strchr(filename, '\n');
-            *newline = '\0';
-            perform_get(filename, sock);
-        } else if(strncmp(buffer, "PUT", strlen("PUT")) == 0) {
-            char* filename = &buffer[strlen("PUT")+1];
-            char* newline = strchr(filename, '\n');
-            *newline = '\0';
-            size_t bytes_used_so_far = (newline+1) - buffer;
-            perform_put(filename, bytesRead - bytes_used_so_far, newline+1, sock);
-        } else if(strncmp(buffer, "LIST", 4) == 0) {
-            perform_list(sock);
-        } else if(strncmp(buffer, "DELETE", strlen("DELETE")) == 0) {
-            char* filename = &buffer[strlen("DELETE")+1];
-            char* newline = strchr(filename, '\n');
-            *newline = '\0';
-            perform_delete(filename, sock);
-        }
-        close(sock);
-    }
-#endif
     return 0;
 }
 
