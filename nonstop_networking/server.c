@@ -383,12 +383,12 @@ static void* sending_get_thread(void *data) {
     {
         int count = fread(buffer, 1, BUFSIZ, f);
         if(count < 0) {
-            perror("Get failed");
+            print_error_message("Get failed");
             fclose(f);
             return NULL;
         }
         if(count == 0) {
-            LOG("Client terminated early\n");
+            print_error_message("Client terminated early\n");
             fclose(f);
             return NULL;
         }
@@ -478,7 +478,7 @@ void session_start_get(Session* session) {
     pthread_attr_init(&attr);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
     if(pthread_create(&exec_thr, &attr, sending_get_thread, session)) {
-        LOG("pthread_create failed.\n");
+        print_error_message("pthread_create failed.\n");
     }
     pthread_attr_destroy(&attr);
 }
@@ -647,11 +647,11 @@ void send_all(char* buffer, size_t size, int sock) {
     {
         size_t count = write(sock, &buffer[bytes_sent], size - bytes_sent);
         if(count < 0) {
-            perror("Client socket:");
+            print_error_message("Client socket:");
             return;
         }
         if(count == 0) {
-            LOG("Client disconnected\n");
+            print_error_message("Client disconnected\n");
             return;
         }
         bytes_sent += count;
@@ -664,11 +664,11 @@ void write_all(FILE* f, char* buffer, size_t size) {
     {
         size_t count = fwrite(&buffer[bytes_sent], 1, size - bytes_sent, f);
         if(count < 0) {
-            perror("Output file");
+            print_error_message("Output file");
             return;
         }
         if(count == 0) {
-            LOG("Output write failed\n");
+            print_error_message("Output write failed");
             return;
         }
         bytes_sent += count;
