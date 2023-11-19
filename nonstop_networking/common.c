@@ -68,8 +68,8 @@ hashtable_ts_insert (
     node = node->next;
   }
 //  printf("%s, %d, node = malloc (sizeof (my_hash_node_t))\n", __FILE__, __LINE__);
-  if (!(node = malloc (sizeof (my_hash_node_t)))) {
-    return -1;
+  if (!(node = (my_hash_node_t*)malloc (sizeof (my_hash_node_t)))) {
+    return HASH_TABLE_SYSTEM_ERROR;
   }
 
   node->key = keyP;

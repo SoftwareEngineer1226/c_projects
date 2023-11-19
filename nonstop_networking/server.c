@@ -249,7 +249,7 @@ bool TryParse(Session* session, char* cmd, bool hasFilename) {
     return true;
 }
 
-void write_short_string(Session* session, char* str) {
+/*void write_short_string(Session* session, char* str) {
     char c;
     int result = STREAM_OK;
     while(result == STREAM_OK) {
@@ -267,7 +267,7 @@ void write_short_string(Session* session, char* str) {
     {
         session->state = STATE_WRITING;
     }
-}
+}*/
 
 // Called when we get data and we are in the middle of reading the header
 bool continue_reading_header(Session* session) {
@@ -303,6 +303,7 @@ static void send_response_for_put(Session* session)
     sprintf(buffer, "OK\n");
     send_all(buffer, strlen(buffer), session->stream.socket);
     session->state = STATE_DONE;
+    session->status = STATUS_SESSION_END;
     if(!exist) {
         vector_push_back(directory, strdup(session->filename));
     }
@@ -316,6 +317,7 @@ bool continue_reading_put(Session* session)
     if(session->totalsent >= session->totalBytesForPut) {
         send_response_for_put(session);
     }
+    session->state = STATE_READING_PUT;
     return false;
 }
 
@@ -351,8 +353,7 @@ int Stream_WriteNext(Stream* stream, char c) {
 }
 
 
-static void* sending_get_thread(void *data) {
-    Session *session = (Session*)data;
+static int sending_get_response(Session* session) {
     char *filename = session->filename;
     int sock = session->stream.socket;
     
@@ -365,7 +366,9 @@ static void* sending_get_thread(void *data) {
     if(f == NULL) {
         sprintf(buffer, "ERROR\nUnknown file\n");
         send_all(buffer, strlen(buffer), sock);
-        return NULL;
+        session->state = STATE_INTERNAL_ERROR;
+        session->status = STATUS_SESSION_ERROR;
+        return -1;
     }
     // Set up the header
     strcpy(buffer, "OK\n12345678"); // Note we will overwrite 12345678 with a size_t
@@ -379,22 +382,22 @@ static void* sending_get_thread(void *data) {
         if(count < 0) {
             print_error_message("Get failed");
             fclose(f);
-            return NULL;
+            return -1;
         }
         if(count == 0) {
             print_error_message("Client terminated early\n");
             fclose(f);
-            return NULL;
+            return -1;
         }
         bytes_read += count;
         send_all(buffer, count, sock);
     } while (bytes_read < (size_t)file_info.st_size);
     fclose(f);
-    printf("%zu\n", bytes_read);
 
     session->state = STATE_DONE;
+    session->status = STATUS_SESSION_END;
 
-    return NULL;
+    return 0;
 }
 
 void session_start_delete(Session *session)
@@ -403,15 +406,15 @@ void session_start_delete(Session *session)
     char fullpath[BUFSIZ];
 
     if(strlen(session->filename)) {
-            for(size_t i=0; i < vector_size(directory); i++) {
-                char *diritem = vector_get(directory, i);
-                if( !strcmp(session->filename, diritem) ) {
-                    snprintf(fullpath, sizeof(fullpath), "%s/%s", base_temp_dir, session->filename);
-                    free(diritem);
-                    vector_erase(directory, i); 
-                    break;
-                }
+        for(size_t i=0; i < vector_size(directory); i++) {
+            char *diritem = vector_get(directory, i);
+            if( !strcmp(session->filename, diritem) ) {
+                snprintf(fullpath, sizeof(fullpath), "%s/%s", base_temp_dir, session->filename);
+                free(diritem);
+                vector_erase(directory, i); 
+                break;
             }
+        }
         
         char buffer[BUFSIZ];
         result = unlink(fullpath);
@@ -423,6 +426,8 @@ void session_start_delete(Session *session)
             send_all(buffer, strlen(buffer), session->stream.socket);
         }
     }
+    session->state = STATE_DONE;
+    session->status = STATUS_SESSION_END;
 }
 
 void session_start_list(Session *session)
@@ -439,6 +444,8 @@ void session_start_list(Session *session)
     session->listData = malloc(sizeCount);
     if(session->listData == NULL) {
         print_error_message("malloc failed");
+        session->state = STATE_INTERNAL_ERROR;
+        session->status = STATUS_SESSION_ERROR;
         return;
     }
     
@@ -458,14 +465,16 @@ void session_start_list(Session *session)
     send_all(buffer, pBuffer - buffer, session->stream.socket);
     send_all(session->listData, sizeCount, session->stream.socket);
     free(session->listData);
-    session->state = STATE_WRITING_LIST;
+
+    session->state = STATE_DONE;
+    session->status = STATUS_SESSION_END;
 
 }
 
 void session_start_get(Session* session) {
     if(strlen(session->filename)) {
         session->state = STATE_SENDING_GET;
-        sending_get_thread(session);
+        //sending_get_response(session);
     }
 }
 
@@ -634,8 +643,12 @@ void send_all(char* buffer, size_t size, int sock) {
     size_t bytes_sent = 0;
     do
     {
-        size_t count = send(sock, &buffer[bytes_sent], size - bytes_sent, 0);
+        int count;
+        count = send(sock, &buffer[bytes_sent], size - bytes_sent, 0);
         if(count < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+                continue;
+            
             print_error_message("Client socket:");
             return;
         }
@@ -651,7 +664,8 @@ void write_all(FILE* f, char* buffer, size_t size) {
     size_t bytes_sent = 0;
     do
     {
-        size_t count = fwrite(&buffer[bytes_sent], 1, size - bytes_sent, f);
+        int count;
+        count = fwrite(&buffer[bytes_sent], 1, size - bytes_sent, f);
         if(count < 0) {
             print_error_message("Output file");
             return;
@@ -748,10 +762,8 @@ int main(int argc, char **argv) {
         for (i = 0; i < n; i++) {
             if ((events[i].events & EPOLLERR) ||
                 (events[i].events & EPOLLHUP) ||
-                (!(events[i].events & EPOLLIN)))
+                (!(events[i].events & EPOLLIN) && !(events[i].events & EPOLLOUT)))
             {
-                /* An error has occured on this fd, or the socket is not
-                   ready for reading (why were we notified then?) */
               print_error_message ("epoll error");
               close (events[i].data.fd);
               continue;
@@ -810,75 +822,121 @@ int main(int argc, char **argv) {
                 continue;
             }
             else {
-                /* We have data on the fd waiting to be read. Read and
-                display it. We must read whatever data is available
-                 completely, as we are running in edge-triggered mode
-                 and won't get a notification again for the same
-                 data. */
-                int done = 0;
+                if(events[i].events & EPOLLIN) {
+                    /* We have data on the fd waiting to be read. Read and
+                    display it. We must read whatever data is available
+                     completely, as we are running in edge-triggered mode
+                     and won't get a notification again for the same
+                     data. */
+                    int done = 0;
+                    Session* session = NULL;
 
-                while (1)
-                {
-                    ssize_t bytesRead;
-                    char *buffer;
+                    while (1)
+                    {
+                        ssize_t bytesRead;
+                        char *buffer;
 
+                        const uint32_t keyP = events[i].data.fd;
+                        hashtable_rc_t hash_rc0;
+                        hash_rc0 = hashtable_ts_get(&sock_to_session_hashtable, keyP, (void * *)&session);
+                        if (hash_rc0 != HASH_TABLE_OK) {
+                            session = Session_create(events[i].data.fd);
+                            hashtable_ts_insert(&sock_to_session_hashtable, keyP, session);
+                        }
+    /*                    if(testSession == NULL) {
+                            testSession = Session_create(events[i].data.fd);
+                            if(testSession ==  NULL)
+                                exit(EXIT_FAILURE);
+                        }
+    */
+                        buffer = session->stream.buffer;
+                        session->stream.position = 0;
+
+                        bytesRead = recv(events[i].data.fd, buffer, BUFSIZ, 0);
+                        if (bytesRead == -1) {
+                            /* If errno == EAGAIN, that means we have read all
+                             data. So go back to the main loop. */
+                            if (errno != EAGAIN)
+                            {
+                                perror ("read");
+                                if(session->state != STATE_SENDING_GET)
+                                    done = 1;
+                            }
+                            break;
+                        } else if (bytesRead == 0) {
+                            /* End of file. The remote has closed the
+                               connection. */
+                            if(session->state != STATE_SENDING_GET)
+                                done = 1;
+                            break;
+                        }
+
+                        session->stream.bytesInBuffer = bytesRead;
+
+                        Session_processNext(session);
+
+                        if(session->state == STATE_SENDING_GET) {
+                          int fd = events[i].data.fd;
+                          struct epoll_event event = {0};
+                          event.data.fd = fd;
+                          event.events = EPOLLOUT | EPOLLET;
+                          if (epoll_ctl(efd, EPOLL_CTL_MOD, fd, &event) < 0) {
+                            print_error_message("epoll_ctl EPOLL_CTL_MOD");
+                          }
+                        }
+                        /* Write the buffer to standard output */
+                        /*s = write (1, buffer, bytesRead);
+                        if (s == -1) {
+                            perror ("write");
+                            exit(EXIT_FAILURE);
+                        }*/
+                        
+                    }
+
+                    
+                    if (session && session->state != STATE_SENDING_GET && done)
+                    {
+                        printf ("Closed connection on descriptor %d\n",
+                                events[i].data.fd);
+
+                        close (events[i].data.fd);
+
+                        uint32_t keyP = events[i].data.fd;
+                        hashtable_ts_free(&sock_to_session_hashtable, keyP);
+                    }
+
+                }
+                else if (events[i].events & EPOLLOUT) {
                     const uint32_t keyP = events[i].data.fd;
-                    Session* session;
+                    Session *session;
                     hashtable_rc_t hash_rc0;
                     hash_rc0 = hashtable_ts_get(&sock_to_session_hashtable, keyP, (void * *)&session);
                     if (hash_rc0 != HASH_TABLE_OK) {
                         session = Session_create(events[i].data.fd);
                         hashtable_ts_insert(&sock_to_session_hashtable, keyP, session);
                     }
-/*                    if(testSession == NULL) {
-                        testSession = Session_create(events[i].data.fd);
-                        if(testSession ==  NULL)
-                            exit(EXIT_FAILURE);
+                    sending_get_response(session);
+
+                    if(session->state == STATE_DONE) {
+                      int fd = events[i].data.fd;
+                      struct epoll_event event = {0};
+                      event.data.fd = fd;
+                      event.events = EPOLLIN | EPOLLET;
+                      if (epoll_ctl(efd, EPOLL_CTL_MOD, fd, &event) < 0) {
+                        print_error_message("epoll_ctl EPOLL_CTL_MOD");
+                      }
                     }
-*/
-                    buffer = session->stream.buffer;
-                    session->stream.position = 0;
+                    else if(session->state == STATE_INTERNAL_ERROR) {
+                        print_error_message("internal error");
 
-                    bytesRead = recv(events[i].data.fd, buffer, BUFSIZ, 0);
-                    if (bytesRead == -1) {
-                        /* If errno == EAGAIN, that means we have read all
-                         data. So go back to the main loop. */
-                        if (errno != EAGAIN)
-                        {
-                            perror ("read");
-                            done = 1;
-                        }
-                        break;
-                    } else if (bytesRead == 0) {
-                        /* End of file. The remote has closed the
-                           connection. */
-                        done = 1;
-                        break;
+                        printf ("Closed connection on descriptor %d\n",
+                                events[i].data.fd);
+
+                        close (events[i].data.fd);
+
+                        uint32_t keyP = events[i].data.fd;
+                        hashtable_ts_free(&sock_to_session_hashtable, keyP);
                     }
-
-                    session->stream.bytesInBuffer = bytesRead;
-
-                    Session_processNext(session);
-
-                    /* Write the buffer to standard output */
-                    /*s = write (1, buffer, bytesRead);
-                    if (s == -1) {
-                        perror ("write");
-                        exit(EXIT_FAILURE);
-                    }*/
-                }
-
-                if (done)
-                {
-                    printf ("Closed connection on descriptor %d\n",
-                            events[i].data.fd);
-
-                    /* Closing the descriptor will make epoll remove it
-                       from the set of descriptors which are monitored. */
-                    close (events[i].data.fd);
-
-                    uint32_t keyP = events[i].data.fd;
-                    hashtable_ts_free(&sock_to_session_hashtable, keyP);
                 }
             }
         }

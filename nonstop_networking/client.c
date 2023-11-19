@@ -28,7 +28,8 @@ void send_all(char* buffer, size_t size, int sock) {
     size_t bytes_sent = 0;
     do
     {
-        size_t count = write(sock, &buffer[bytes_sent], size - bytes_sent);
+        int count;
+        count = write(sock, &buffer[bytes_sent], size - bytes_sent);
         if(count < 0) {
             print_connection_closed();
             exit(1);
@@ -58,7 +59,7 @@ int read_next(ReadState* state) {
         return c;
     } else {
         struct pollfd fds[1];
-        int timeout = 1000; // ms
+        int timeout = 100; // ms
         fds[0].fd = state->sock;
         fds[0].events = POLLIN|POLLPRI;
         fds[0].revents = 0;
@@ -66,7 +67,7 @@ int read_next(ReadState* state) {
         if (res == 0)
         {
             //printf("poll timeout\n");
-            return MY_EOF;
+            return 0;
         } else if (res < 0) {
             printf("error in poll\n");
             return MY_EOF;
@@ -142,7 +143,7 @@ void handle_list_response(char* pBuffer, size_t bytes_left, int sock) {
         count++;
     } while (count < size);
     int c = read_next(&state);
-    if(c != MY_EOF) {
+    if(c != MY_EOF && c != 0) {
         print_received_too_much_data();
         exit(1);
     }
@@ -163,7 +164,7 @@ void handle_delete_response(char* pBuffer, size_t bytes_left, int sock) {
         exit(1);
     }
     int c = read_next(&state);
-    if(c != MY_EOF) {
+    if(c != MY_EOF && c != 0) {
         print_received_too_much_data();
         exit(1);
     }
@@ -200,8 +201,9 @@ void handle_get_response(char* pBuffer, size_t bytes_left, int sock, char* filen
         fputc(c, output);
         count++;
     } while (count < size);
+    printf("%zu\n", count);
     int c = read_next(&state);
-    if(c != MY_EOF) {
+    if(c != MY_EOF && c != 0) {
         print_received_too_much_data();
         exit(1);
     }
@@ -221,7 +223,7 @@ void handle_put_response(char* pBuffer, size_t bytes_left, int sock) {
         exit(1);
     }
     int c = read_next(&state);
-    if(c != MY_EOF) {
+    if(c != MY_EOF && c != 0) {
         print_received_too_much_data();
         exit(1);
     }
@@ -230,7 +232,7 @@ void handle_put_response(char* pBuffer, size_t bytes_left, int sock) {
 
 
 typedef struct s_response{
-    status status;
+    int status;
     char* error_message;
     size_t size;
 }s_response;
@@ -300,7 +302,8 @@ void send_file(char* filename, int sock) {
         printf("Can't open file %s\n", filename);
         exit(1);
     }
-    write(sock, (char*)(&file_info.st_size), sizeof(size_t));
+    if(write(sock, (char*)(&file_info.st_size), sizeof(size_t)) <= 0) {
+    }
     size_t bytes_written = 0;
     char buffer[BUFSIZ];
     do
@@ -429,7 +432,7 @@ char **parse_args(int argc, char **argv) {
         return NULL;
     }
 
-    char **args = calloc(1, 6 * sizeof(char *));
+    char **args = (char**)calloc(1, 6 * sizeof(char *));
     args[0] = host;
     args[1] = port;
     args[2] = argv[2];
