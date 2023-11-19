@@ -201,7 +201,6 @@ void handle_get_response(char* pBuffer, size_t bytes_left, int sock, char* filen
         fputc(c, output);
         count++;
     } while (count < size);
-    printf("%zu\n", count);
     int c = read_next(&state);
     if(c != MY_EOF && c != 0) {
         print_received_too_much_data();

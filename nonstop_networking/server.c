@@ -78,7 +78,7 @@ typedef struct {
     bool reading;           // IS this session currently reading from the socket or writing to it
 
     size_t totalBytesForPut;
-    size_t totalsent;
+    size_t totalWritten;
 } Session;
 
 static char base_temp_dir[BUFSIZ];
@@ -87,9 +87,6 @@ static my_hash_table_t sock_to_session_hashtable;
 
 // Flush the rest of the write buffer to the socket, and clear it out, however, don't block. This can return STREAM_END, STREAM_PENDING, STREAM_ERROR or STREAM_OK
 int Stream_Send(Stream* stream);
-
-// Write next character to buffer, and flush to stream if buffer is full. This can return STREAM_END, STREAM_PENDING, or STREAM_ERROR
-int Stream_WriteNext(Stream* stream, char c);
 // Read the next character from the stream without blocking, or send back STREAM_END, STREAM_PENDING or STREAM_ERROR
 int Stream_GetNext(Stream* stream);
 // Reset a stream to initial state with the socket passed in
@@ -249,26 +246,6 @@ bool TryParse(Session* session, char* cmd, bool hasFilename) {
     return true;
 }
 
-/*void write_short_string(Session* session, char* str) {
-    char c;
-    int result = STREAM_OK;
-    while(result == STREAM_OK) {
-        c = *str++;
-        result = Stream_WriteNext(&session->stream, c);
-    }
-    if(result == STREAM_OK) {
-        result = Stream_Send(&session->stream);
-    }
-    if(result == STREAM_END) {
-        session->state = STATE_DONE;
-        session->status = STATUS_SESSION_END;
-    }
-    else
-    {
-        session->state = STATE_WRITING;
-    }
-}*/
-
 // Called when we get data and we are in the middle of reading the header
 bool continue_reading_header(Session* session) {
     do
@@ -295,13 +272,11 @@ bool continue_reading_header(Session* session) {
     return false;//Session_has_more(&session->stream);
 }
 
-static void send_response_for_put(Session* session)
+static void sending_put_response(Session* session, char *msg)
 {
-    char buffer[BUFSIZ];
     int exist = exist_in_vector(directory, session->filename);
     fclose(session->fd);
-    sprintf(buffer, "OK\n");
-    send_all(buffer, strlen(buffer), session->stream.socket);
+    send_all(msg, strlen(msg), session->stream.socket);
     session->state = STATE_DONE;
     session->status = STATUS_SESSION_END;
     if(!exist) {
@@ -312,12 +287,15 @@ static void send_response_for_put(Session* session)
 bool continue_reading_put(Session* session)
 {
     write_all(session->fd, session->stream.buffer, session->stream.bytesInBuffer);
-    session->totalsent += session->stream.bytesInBuffer;
+    session->totalWritten += session->stream.bytesInBuffer;
 
-    if(session->totalsent >= session->totalBytesForPut) {
-        send_response_for_put(session);
+    if(session->totalWritten == session->totalBytesForPut) {
+        sending_put_response(session, "OK\n");
+        session->state = STATE_DONE;
+    } else if(session->totalWritten > session->totalBytesForPut) { // for short content
+        sending_put_response(session, "ERROR\nReceived too mush data\n");
+        session->state = STATE_DONE;
     }
-    session->state = STATE_READING_PUT;
     return false;
 }
 
@@ -403,7 +381,7 @@ static int sending_get_response(Session* session) {
 void session_start_delete(Session *session)
 {
     int result = 0;
-    char fullpath[BUFSIZ];
+    char fullpath[BUFSIZ] = "";
 
     if(strlen(session->filename)) {
         for(size_t i=0; i < vector_size(directory); i++) {
@@ -416,7 +394,7 @@ void session_start_delete(Session *session)
             }
         }
         
-        char buffer[BUFSIZ];
+        char buffer[BUFSIZ] = "";
         result = unlink(fullpath);
         if(result == 0) {
             sprintf(buffer, "OK\n");
@@ -474,7 +452,6 @@ void session_start_list(Session *session)
 void session_start_get(Session* session) {
     if(strlen(session->filename)) {
         session->state = STATE_SENDING_GET;
-        //sending_get_response(session);
     }
 }
 
@@ -486,7 +463,7 @@ void session_start_put(Session* session, size_t cmdLen) {
         size_t head_size = cmdLen + strlen(session->filename) + 2; // "PUT abc.png\n"
     
         if(session->inputPos >= head_size + 8) {
-            char buffer[BUFSIZ];
+            char buffer[BUFSIZ] = "";
             snprintf(buffer, sizeof(buffer), "%s/%s", base_temp_dir, session->filename);
             session->fd = fopen(buffer, "wb");
             if(session->fd == NULL) {
@@ -502,15 +479,17 @@ void session_start_put(Session* session, size_t cmdLen) {
 
             printf("totalBytesForPut: %zu\n", session->totalBytesForPut);
 
-            size_t nowSendingBytes = session->inputPos - head_size - 8;
+            size_t nowWritingBytes = session->inputPos - head_size - 8;
         
-            if(nowSendingBytes > 0) {
-                write_all(session->fd, &session->input[head_size + 8], nowSendingBytes);
-                session->totalsent = nowSendingBytes;
+            if(nowWritingBytes > 0) {
+                write_all(session->fd, &session->input[head_size + 8], nowWritingBytes);
+                session->totalWritten = nowWritingBytes;
             }
 
-            if(session->totalsent >= session->totalBytesForPut) { // for short content
-                send_response_for_put(session);
+            if(session->totalWritten == session->totalBytesForPut) { // for short content
+                sending_put_response(session, "OK\n");
+            } else if(session->totalWritten > session->totalBytesForPut) { // for short content
+                sending_put_response(session, "ERROR\nReceived too mush data\n");
             } else {
                 session->state = STATE_READING_PUT;
             }
@@ -520,7 +499,8 @@ void session_start_put(Session* session, size_t cmdLen) {
 }
 
 Session* Session_create(int sock) {
-    Session* session = malloc(sizeof(Session));
+    Session* session = NULL;
+    session = malloc(sizeof(Session));
     if(session == NULL) {
         print_error_message("malloc failed");
         return NULL;
@@ -716,7 +696,7 @@ int main(int argc, char **argv) {
 
     int efd;
     struct epoll_event event;
-    struct epoll_event *events;
+    struct epoll_event *events = NULL;
     int server_fd, s;
 
     initialize();
@@ -843,12 +823,7 @@ int main(int argc, char **argv) {
                             session = Session_create(events[i].data.fd);
                             hashtable_ts_insert(&sock_to_session_hashtable, keyP, session);
                         }
-    /*                    if(testSession == NULL) {
-                            testSession = Session_create(events[i].data.fd);
-                            if(testSession ==  NULL)
-                                exit(EXIT_FAILURE);
-                        }
-    */
+
                         buffer = session->stream.buffer;
                         session->stream.position = 0;
 
@@ -893,6 +868,12 @@ int main(int argc, char **argv) {
                         
                     }
 
+                    if(session && session->state == STATE_READING_PUT && done) {
+                        if(session->totalWritten < session->totalBytesForPut) {
+                            sending_put_response(session, "ERROR\nReceived too little data\n");
+                            session->state = STATE_DONE;
+                        }
+                    }
                     
                     if (session && session->state != STATE_SENDING_GET && done)
                     {
