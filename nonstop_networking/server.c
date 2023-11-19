@@ -11,7 +11,6 @@
 #include <netdb.h>
 #include <fcntl.h>
 #include <sys/epoll.h>
-#include <pthread.h>
 #include <signal.h>
 #include <sys/time.h>
 #include <sys/resource.h>
@@ -85,7 +84,6 @@ typedef struct {
 static char base_temp_dir[BUFSIZ];
 static vector* directory;
 static my_hash_table_t sock_to_session_hashtable;
-static pthread_mutex_t directory_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // Flush the rest of the write buffer to the socket, and clear it out, however, don't block. This can return STREAM_END, STREAM_PENDING, STREAM_ERROR or STREAM_OK
 int Stream_Send(Stream* stream);
@@ -178,14 +176,12 @@ int set_sighandler(sighandler_t sig_usr)
 int exist_in_vector(vector* vector, char *data)
 {
     int ret = 0;
-    pthread_mutex_lock(&directory_mutex);
     VECTOR_FOR_EACH(vector, item, {
         if(!strcmp(data, item)) {
             ret = 1;
             break;
         }
     });
-    pthread_mutex_unlock(&directory_mutex);
     return ret;
 }
 
@@ -308,9 +304,7 @@ static void send_response_for_put(Session* session)
     send_all(buffer, strlen(buffer), session->stream.socket);
     session->state = STATE_DONE;
     if(!exist) {
-        pthread_mutex_lock(&directory_mutex);
         vector_push_back(directory, strdup(session->filename));
-        pthread_mutex_unlock(&directory_mutex);
     }
 }
 
@@ -396,6 +390,9 @@ static void* sending_get_thread(void *data) {
         send_all(buffer, count, sock);
     } while (bytes_read < (size_t)file_info.st_size);
     fclose(f);
+    printf("%zu\n", bytes_read);
+
+    session->state = STATE_DONE;
 
     return NULL;
 }
@@ -406,7 +403,6 @@ void session_start_delete(Session *session)
     char fullpath[BUFSIZ];
 
     if(strlen(session->filename)) {
-        pthread_mutex_lock(&directory_mutex);
             for(size_t i=0; i < vector_size(directory); i++) {
                 char *diritem = vector_get(directory, i);
                 if( !strcmp(session->filename, diritem) ) {
@@ -416,7 +412,6 @@ void session_start_delete(Session *session)
                     break;
                 }
             }
-        pthread_mutex_unlock(&directory_mutex);
         
         char buffer[BUFSIZ];
         result = unlink(fullpath);
@@ -437,11 +432,9 @@ void session_start_list(Session *session)
     // Note we assume there is a vector called directory storing the directory of all files in the temp folder
     // We do this as per instructions rather than reading the filesystem directly.
     size_t sizeCount = 0;
-    pthread_mutex_lock(&directory_mutex);
     VECTOR_FOR_EACH(directory, diritem, {
         sizeCount += strlen(diritem) + 1; // +1 for the newline
     });
-    pthread_mutex_unlock(&directory_mutex);
     sizeCount++; // Add one for the end null character;
     session->listData = malloc(sizeCount);
     if(session->listData == NULL) {
@@ -450,14 +443,12 @@ void session_start_list(Session *session)
     }
     
     char* end = session->listData;
-    pthread_mutex_lock(&directory_mutex);
     VECTOR_FOR_EACH(directory, diritem, {
         size_t len = strlen((char*)diritem);
         strcpy(end, diritem);
         end[len] = '\n';
         end += len + 1;
     });
-    pthread_mutex_unlock(&directory_mutex);
     *end = '\0';
 
     // Set up the header
@@ -643,7 +634,7 @@ void send_all(char* buffer, size_t size, int sock) {
     size_t bytes_sent = 0;
     do
     {
-        size_t count = write(sock, &buffer[bytes_sent], size - bytes_sent);
+        size_t count = send(sock, &buffer[bytes_sent], size - bytes_sent, 0);
         if(count < 0) {
             print_error_message("Client socket:");
             return;
@@ -838,10 +829,7 @@ int main(int argc, char **argv) {
                     if (hash_rc0 != HASH_TABLE_OK) {
                         session = Session_create(events[i].data.fd);
                         hashtable_ts_insert(&sock_to_session_hashtable, keyP, session);
-                    } else {
-                        hashtable_ts_nodes_unlock(&sock_to_session_hashtable, keyP);
                     }
-
 /*                    if(testSession == NULL) {
                         testSession = Session_create(events[i].data.fd);
                         if(testSession ==  NULL)

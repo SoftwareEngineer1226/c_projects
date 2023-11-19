@@ -43,7 +43,6 @@ typedef struct my_hash_node_s
 
 typedef struct
 {
-    pthread_mutex_t lock_nodes[HASH_TABLE_SIZE];
     uint32_t num_elements;
     my_hash_node_t *nodes[HASH_TABLE_SIZE];
     uint32_t      (*hashfunc)(const uint32_t);
@@ -58,9 +57,6 @@ hashtable_rc_t hashtable_ts_insert (my_hash_table_t * hashtblP,
 hashtable_rc_t hashtable_ts_free (my_hash_table_t * hashtblP, const uint32_t keyP);
 hashtable_rc_t hashtable_ts_get (my_hash_table_t * hashtblP,
       const uint32_t keyP, void **dataP);
-hashtable_rc_t hashtable_ts_nodes_unlock (
-  my_hash_table_t * const hashtblP,
-  const uint32_t keyP);
 
 void send_all(char* buffer, size_t size, int sock);
 

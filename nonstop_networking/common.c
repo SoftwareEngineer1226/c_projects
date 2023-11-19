@@ -1,6 +1,5 @@
 #include "common.h"
 
-#include <pthread.h>
 
 //------------------------------------------------------------------------------
 /*
@@ -26,7 +25,6 @@ void hashtable_ts_init (my_hash_table_t * hashtblP,
   
   for (i = 0; i < HASH_TABLE_SIZE; i++) {
     hashtblP->nodes[i]=NULL;
-    pthread_mutex_init(&hashtblP->lock_nodes[i], NULL);
   }
 
   hashtblP->name = strdup(tablename);
@@ -51,7 +49,6 @@ hashtable_ts_insert (
   }
 
   hash = hashtblP->hashfunc(keyP);
-  pthread_mutex_lock(&hashtblP->lock_nodes[hash]);
   node = hashtblP->nodes[hash];
 
   while (node) {
@@ -60,12 +57,10 @@ hashtable_ts_insert (
 //        printf("%s, %d, free(node->data);\n", __FILE__, __LINE__);
         free(node->data);
         node->data = dataP;
-        pthread_mutex_unlock(&hashtblP->lock_nodes[hash]);
         printf("%s(key 0x%x data %p) return INSERT_OVERWRITTEN_DATA\n", __FUNCTION__, keyP, dataP);
         return HASH_TABLE_INSERT_OVERWRITTEN_DATA;
       }
       node->data = dataP;
-      pthread_mutex_unlock(&hashtblP->lock_nodes[hash]);
       //printf("%s(key 0x%x data %p) return HASH_TABLE_OK\n", __FUNCTION__, keyP, dataP);
       return HASH_TABLE_OK;
       }
@@ -74,7 +69,6 @@ hashtable_ts_insert (
   }
 //  printf("%s, %d, node = malloc (sizeof (my_hash_node_t))\n", __FILE__, __LINE__);
   if (!(node = malloc (sizeof (my_hash_node_t)))) {
-      pthread_mutex_unlock(&hashtblP->lock_nodes[hash]);
     return -1;
   }
 
@@ -89,7 +83,6 @@ hashtable_ts_insert (
 
   hashtblP->nodes[hash] = node;
   hashtblP->num_elements++;
-  pthread_mutex_unlock(&hashtblP->lock_nodes[hash]);
   //printf("%s(key 0x%x data %p) next %p return HASH_TABLE_OK\n", __FUNCTION__, keyP, dataP, node->next);
   return HASH_TABLE_OK;
 }
@@ -113,7 +106,6 @@ hashtable_ts_free (
   }
 
   hash = hashtblP->hashfunc(keyP);
-  pthread_mutex_lock(&hashtblP->lock_nodes[hash]);
   node = hashtblP->nodes[hash];
 
   while (node) {
@@ -132,7 +124,6 @@ hashtable_ts_free (
       free(node);
       node=NULL;
       hashtblP->num_elements--;
-      pthread_mutex_unlock(&hashtblP->lock_nodes[hash]);
       //printf("%s(key 0x%x) return OK\n", __FUNCTION__, keyP);
       return HASH_TABLE_OK;
     }
@@ -141,7 +132,6 @@ hashtable_ts_free (
     node = node->next;
   }
 
-   pthread_mutex_unlock(&hashtblP->lock_nodes[hash]);
    printf("%s(key 0x%x) return KEY_NOT_EXISTS\n", __FUNCTION__, keyP);
   return HASH_TABLE_KEY_NOT_EXISTS;
 }
@@ -167,85 +157,19 @@ hashtable_ts_get (
 
   hash = hashtblP->hashfunc(keyP);
 
-  pthread_mutex_lock(&hashtblP->lock_nodes[hash]);
   node = hashtblP->nodes[hash];
 
   while (node) {
     if (node->key == keyP) {
       *dataP = node->data;
       //printf("%s, key = %u, lock\n", hashtblP->name, keyP);
-      //pthread_mutex_unlock(&hashtblP->lock_nodes[hash]);
       //printf("%s(key 0x%x data %p) return OK\n", __FUNCTION__, keyP, *dataP);
       return HASH_TABLE_OK;
     }
 
     node = node->next;
   }
-  pthread_mutex_unlock(&hashtblP->lock_nodes[hash]);
   //printf("%s(key 0x%x) return KEY_NOT_EXISTS\n", __FUNCTION__, keyP);
 
   return HASH_TABLE_KEY_NOT_EXISTS;
 }
-
-/*  
-hashtable_rc_t
-hashtable_part_ts_apply_callback_on_elements (
-  my_hash_table_t * hashtblP,
-  int index,
-  int funct_cb (int priv_len,
-               uint64_t keyP,
-               void * dataP,
-               void *parameterP, 
-               void ** resultP),
-  void *parameterP,
-  void** resultP)
-{
-  my_hash_node_t                             *node = NULL;
-  unsigned int                              i = index * 50000;
-  unsigned int                              num_elements = 0;
-  unsigned int                              have = 0;
-  int                                      ret;
-  if (!hashtblP) {
-    return HASH_TABLE_BAD_PARAMETER_HASHTABLE;
-  }
-  //printf("index=%d\n", index);
-
-  while ((num_elements < hashtblP->num_elements) && (i < (index + 1) * 50000)) {
-    pthread_mutex_lock(&hashtblP->lock_nodes[i]);
-    if (hashtblP->nodes[i] != NULL) {
-      //printf("%d-th node is not empty\n", i);
-      node = hashtblP->nodes[i];
-
-      while (node) {
-        num_elements++;
-        ret = funct_cb (have, node->key, node->data, parameterP, resultP);
-        //printf("ret=%d\n", ret);
-        if (ret != -1)
-            have = ret;
-
-        node = node->next;
-      }
-    }
-    pthread_mutex_unlock(&hashtblP->lock_nodes[i]);
-    i++;
-  }
-
-  return HASH_TABLE_OK;
-}  
-*/
-
-hashtable_rc_t
-hashtable_ts_nodes_unlock (
-  my_hash_table_t * hashtblP,
-  const uint32_t keyP)
-{
-    size_t                             hash = 0;
-    if (!hashtblP) {
-      return HASH_TABLE_BAD_PARAMETER_HASHTABLE;
-    }
-    //printf("%s, key = %u, unlock\n", hashtblP->name, keyP);
-    hash = hashtblP->hashfunc (keyP);
-    pthread_mutex_unlock(&hashtblP->lock_nodes[hash]);
-    return HASH_TABLE_OK;
-}  
-
