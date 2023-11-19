@@ -82,7 +82,7 @@ typedef struct {
 } Session;
 
 static char base_temp_dir[BUFSIZ];
-static vector* directory;
+static vector* directory = NULL;
 static my_hash_table_t sock_to_session_hashtable;
 
 // Flush the rest of the write buffer to the socket, and clear it out, however, don't block. This can return STREAM_END, STREAM_PENDING, STREAM_ERROR or STREAM_OK
