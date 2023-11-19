@@ -471,7 +471,6 @@ void session_start_put(Session* session, size_t cmdLen) {
                 send_all(buffer, strlen(buffer), session->stream.socket);
                 session->state = STATE_INTERNAL_ERROR;
                 session->status = STATUS_SESSION_ERROR;
-                fclose(session->fd);
                 return;
             }
             
