@@ -357,14 +357,11 @@ static int sending_get_response(Session* session) {
     do
     {
         int count = fread(buffer, 1, BUFSIZ, f);
-        if(count < 0) {
-            print_error_message("Get failed");
+        if(count <= 0) {
+            print_error_message("fread failed");
             fclose(f);
-            return -1;
-        }
-        if(count == 0) {
-            print_error_message("Client terminated early\n");
-            fclose(f);
+            session->state = STATE_INTERNAL_ERROR;
+            session->status = STATUS_SESSION_ERROR;
             return -1;
         }
         bytes_read += count;
