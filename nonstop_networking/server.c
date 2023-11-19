@@ -416,9 +416,9 @@ void session_start_list(Session *session)
         sizeCount += strlen(diritem) + 1; // +1 for the newline
     });
     sizeCount++; // Add one for the end null character;
-    session->listData = malloc(sizeCount);
+    session->listData = calloc(1, sizeCount);
     if(session->listData == NULL) {
-        print_error_message("malloc failed");
+        print_error_message("calloc failed");
         session->state = STATE_INTERNAL_ERROR;
         session->status = STATUS_SESSION_ERROR;
         return;
@@ -473,10 +473,7 @@ void session_start_put(Session* session, size_t cmdLen) {
             
             memcpy(&session->totalBytesForPut, &session->input[head_size], sizeof(size_t));
 
-            printf("totalBytesForPut: %zu\n", session->totalBytesForPut);
-
             size_t nowWritingBytes = session->inputPos - head_size - 8;
-        
             if(nowWritingBytes > 0) {
                 write_all(session->fd, &session->input[head_size + 8], nowWritingBytes);
                 session->totalWritten = nowWritingBytes;
@@ -496,9 +493,9 @@ void session_start_put(Session* session, size_t cmdLen) {
 
 Session* Session_create(int sock) {
     Session* session = NULL;
-    session = malloc(sizeof(Session));
+    session = calloc(1, sizeof(Session));
     if(session == NULL) {
-        print_error_message("malloc failed");
+        print_error_message("calloc failed");
         return NULL;
     }
     Stream_Reset(&session->stream, sock);
