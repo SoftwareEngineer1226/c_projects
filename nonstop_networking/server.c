@@ -440,6 +440,7 @@ void session_start_list(Session *session)
     send_all(buffer, pBuffer - buffer, session->stream.socket);
     send_all(session->listData, sizeCount, session->stream.socket);
     free(session->listData);
+    session->listData = NULL;
 
     session->state = STATE_DONE;
     session->status = STATUS_SESSION_END;
@@ -448,6 +449,7 @@ void session_start_list(Session *session)
 
 void session_start_get(Session* session) {
     if(strlen(session->filename)) {
+        sending_get_response(session);
         session->state = STATE_SENDING_GET;
     }
 }
@@ -843,15 +845,6 @@ int main(int argc, char **argv) {
 
                         Session_processNext(session);
 
-                        if(session->state == STATE_SENDING_GET) {
-                          int fd = events[i].data.fd;
-                          struct epoll_event event = {0};
-                          event.data.fd = fd;
-                          event.events = EPOLLOUT | EPOLLET;
-                          if (epoll_ctl(efd, EPOLL_CTL_MOD, fd, &event) < 0) {
-                            print_error_message("epoll_ctl EPOLL_CTL_MOD");
-                          }
-                        }
                         /* Write the buffer to standard output */
                         /*s = write (1, buffer, bytesRead);
                         if (s == -1) {
@@ -860,7 +853,7 @@ int main(int argc, char **argv) {
                         }*/
                         
                     }
-
+                    
                     if(session && session->state == STATE_READING_PUT && done) {
                         if(session->totalWritten < session->totalBytesForPut) {
                             sending_put_response(session, "ERROR\nReceived too little data\n");
@@ -877,32 +870,7 @@ int main(int argc, char **argv) {
 
                         uint32_t keyP = events[i].data.fd;
                         hashtable_ts_free(&sock_to_session_hashtable, keyP);
-                    }
-
-                }
-                else if (events[i].events & EPOLLOUT) {
-                    const uint32_t keyP = events[i].data.fd;
-                    Session *session;
-                    hashtable_rc_t hash_rc0;
-                    hash_rc0 = hashtable_ts_get(&sock_to_session_hashtable, keyP, (void * *)&session);
-                    if (hash_rc0 != HASH_TABLE_OK) {
-                        session = Session_create(events[i].data.fd);
-                        hashtable_ts_insert(&sock_to_session_hashtable, keyP, session);
-                    }
-                    sending_get_response(session);
-
-                    if(session->state == STATE_DONE) {
-                      int fd = events[i].data.fd;
-                      struct epoll_event event = {0};
-                      event.data.fd = fd;
-                      event.events = EPOLLIN | EPOLLET;
-                      if (epoll_ctl(efd, EPOLL_CTL_MOD, fd, &event) < 0) {
-                        print_error_message("epoll_ctl EPOLL_CTL_MOD");
-                      }
-                    }
-                    else if(session->state == STATE_INTERNAL_ERROR) {
-                        print_error_message("internal error");
-
+                    } else if(session && (session->status == STATUS_SESSION_END || session->status == STATUS_SESSION_ERROR)) {
                         printf ("Closed connection on descriptor %d\n",
                                 events[i].data.fd);
 
@@ -911,6 +879,7 @@ int main(int argc, char **argv) {
                         uint32_t keyP = events[i].data.fd;
                         hashtable_ts_free(&sock_to_session_hashtable, keyP);
                     }
+                        
                 }
             }
         }
