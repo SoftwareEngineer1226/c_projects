@@ -6,11 +6,13 @@
 #include <stdlib.h>
 #include <stdio.h>
 
+
 #define LOG(...)                      \
-    do {                              \
-        fprintf(stderr, __VA_ARGS__); \
-        fprintf(stderr, "\n");        \
-    } while (0);
+    if(verbose_flag == 1)                 \
+        do {                              \
+            fprintf(stderr, __VA_ARGS__); \
+            fprintf(stderr, "\n");        \
+        } while (0);
 
 #define MAX_BUF_SIZE 1024
 

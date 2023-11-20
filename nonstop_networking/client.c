@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <sys/epoll.h>
 #include <fcntl.h>
+#include <netdb.h>
 
 #include "common.h"
 
@@ -434,6 +435,43 @@ int main(int argc, char **argv) {
     char buffer[BUFSIZ] = {0};
 
     int maxconn = 1;
+    int errcode;
+    struct addrinfo hints, *res, *result;
+    void *ptr;
+    char addrstr[64] = "";
+
+    memset (&hints, 0, sizeof (hints));
+      hints.ai_family = PF_UNSPEC;
+      hints.ai_socktype = SOCK_STREAM;
+      hints.ai_flags |= AI_CANONNAME;
+
+    errcode = getaddrinfo (host, NULL, &hints, &result);
+    if (errcode != 0)
+    {
+          perror ("getaddrinfo");
+          return -1;
+    }
+      
+    res = result;
+    
+    while (res)
+    {
+        inet_ntop (res->ai_family, res->ai_addr->sa_data, addrstr, 64);
+    
+        switch (res->ai_family)
+        {
+            case AF_INET:
+                ptr = &((struct sockaddr_in *) res->ai_addr)->sin_addr;
+                inet_ntop (res->ai_family, ptr, addrstr, 100);
+                host = addrstr;
+                break;
+            case AF_INET6:
+                break;
+        }
+        res = res->ai_next;
+    }
+      
+    freeaddrinfo(result);
 
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(port);

@@ -84,6 +84,7 @@ typedef struct {
 static char base_temp_dir[BUFSIZ];
 static vector* directory = NULL;
 static my_hash_table_t sock_to_session_hashtable;
+static int verbose_flag = 0;
 
 // Flush the rest of the write buffer to the socket, and clear it out, however, don't block. This can return STREAM_END, STREAM_PENDING, STREAM_ERROR or STREAM_OK
 int Stream_Send(Stream* stream);
@@ -120,6 +121,9 @@ static void print_usage(const char* progname)
 {
   printf(
       "Usage: %s <port>\n"
+      "\n"
+      "where <options>: \n"
+      " -verbose : output log\n"
       "\n"
       ,
       progname
@@ -674,9 +678,26 @@ static void initialize()
 
     directory = vector_create(NULL, NULL, NULL);
 }
+static int parse_args(int argc, char* argv[])
+{
+  int i;
+  for(i=2; i<argc; i++){
+
+    char* arg = argv[i];
+
+    if(!strcmp(arg, "--verbose")) {
+        verbose_flag = 1;
+    } else {
+      	printf("%s: unknown parameter '%s'\n",argv[0],arg);
+      print_usage(argv[0]);
+      return -1;
+    }
+  }
+  return 0;
+}
 
 int main(int argc, char **argv) {
-    if(argc != 2) {
+    if(argc < 2) {
         print_usage(argv[0]);
         exit(-1);
     }
@@ -685,6 +706,9 @@ int main(int argc, char **argv) {
         print_usage(argv[0]);
         exit(-1);
     }
+
+    if(parse_args(argc, argv))
+        return -1;
 
     if(set_sighandler(sig_usr_un))
             return -1;
@@ -776,7 +800,7 @@ int main(int argc, char **argv) {
                                      sbuf, sizeof sbuf,
                                      NI_NUMERICHOST | NI_NUMERICSERV);
                     if (s == 0) {
-                      printf("Accepted connection on descriptor %d "
+                      LOG("Accepted connection on descriptor %d "
                              "(host=%s, port=%s)\n", infd, hbuf, sbuf);
                     }
 
@@ -863,7 +887,7 @@ int main(int argc, char **argv) {
                     
                     if (session && session->state != STATE_SENDING_GET && done)
                     {
-                        printf ("Closed connection on descriptor %d\n",
+                        LOG ("Closed connection on descriptor %d\n",
                                 events[i].data.fd);
 
                         close (events[i].data.fd);
@@ -871,7 +895,7 @@ int main(int argc, char **argv) {
                         uint32_t keyP = events[i].data.fd;
                         hashtable_ts_free(&sock_to_session_hashtable, keyP);
                     } else if(session && (session->status == STATUS_SESSION_END || session->status == STATUS_SESSION_ERROR)) {
-                        printf ("Closed connection on descriptor %d\n",
+                        LOG ("Closed connection on descriptor %d\n",
                                 events[i].data.fd);
 
                         close (events[i].data.fd);
