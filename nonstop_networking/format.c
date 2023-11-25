@@ -23,7 +23,7 @@ void print_client_usage() {
 
 void print_client_help() {
     print_client_usage();
-    printf("Methods:\n \
+    fprintf(stderr, "Methods:\n \
         LIST\t\t\tRequests a list of files on the server.\n \
         PUT <remote> <local>\tUploads <local> file to serve as filename <remote>.\n \
         GET <remote>\t\tDownloads file named <remote> from server.\n \

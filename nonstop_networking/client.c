@@ -8,9 +8,8 @@
 #include <arpa/inet.h>
 #include <sys/stat.h>
 #include <errno.h>
-#include <sys/epoll.h>
-#include <fcntl.h>
 #include <netdb.h>
+#include <poll.h>
 
 #include "common.h"
 
@@ -20,7 +19,7 @@ char **parse_args(int argc, char **argv);
 verb check_args(char **args);
 
 typedef struct {
-    char inputBuffer[BUFSIZ];
+    char inputBuffer[MAX_BUF_SIZE];
     char *pNext;
     size_t bytes_left;
     int sock;
@@ -33,10 +32,14 @@ void send_all(char* buffer, size_t size, int sock) {
     {
         int count;
         count = send(sock, &buffer[bytes_sent], size - bytes_sent, 0);
-        if(count <= 0) {
+        if(count < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK)
                 continue;
             
+            print_connection_closed();
+            exit(1);
+        }
+        if(count == 0) {
             print_connection_closed();
             exit(1);
         }
@@ -60,21 +63,30 @@ int read_next(ReadState* state) {
         state->bytes_left--;
         return c;
     } else {
-        int count =0;
-        do {
-            count = read(state->sock, state->inputBuffer, BUFSIZ);
-            if(count == 0) {
-                state->end = true;
-                return MY_EOF;
-            }
-            if(count == -1) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK)
-                    continue;
-                print_error_message("read failed");
-                print_connection_closed();
-                exit(1);
-            }
-        } while(count <= 0);
+/*        struct pollfd fds[1];
+        int timeout = 10; // ms
+        fds[0].fd = state->sock;
+        fds[0].events = POLLIN|POLLPRI;
+        fds[0].revents = 0;
+        int res = poll(fds, 1, timeout);
+        if (res == 0)
+        {
+            //fprintf(stderr, "poll timeout\n");
+            return 0;
+        } else if (res < 0) {
+            fprintf(stderr, "error in poll\n");
+            return MY_EOF;
+        }
+        */
+        int count = read(state->sock, state->inputBuffer, MAX_BUF_SIZE);
+        if(count == 0) {
+            state->end = true;
+            return MY_EOF;
+        }
+        if(count == -1) {
+            print_connection_closed();
+            exit(1);
+        }
         state->bytes_left = count;
         state->pNext = state->inputBuffer;
         return read_next(state);
@@ -84,12 +96,9 @@ int read_next(ReadState* state) {
 void read_line(ReadState* state, char *pBuffer, bool formatError) {
     int c;
     while((c = read_next(state)) != MY_EOF) {
-        
-        if(c == '\n' || c == '\0') {
-            *pBuffer++ = '\0';
-            return;
-        }
         *pBuffer++ = (char)c;
+        if(c == '\n' || c == '\0')
+            return;
     }
     if(formatError)
         print_invalid_response();
@@ -112,22 +121,30 @@ size_t read_size(ReadState* state) {
     return result;
 }
 
-void handle_list_response(char* pBuffer, size_t bytes_left, int sock) {
-    ReadState state;
-    start_read(&state, pBuffer, bytes_left, sock);
-    char buffer[BUFSIZ];
-    read_line(&state, buffer, true);
-    if(strcmp(buffer, "ERROR") == 0) {
-        read_line(&state, buffer, true);
+static void print_response_status(ReadState* state, char* buffer) {
+     if(strncmp(buffer, "ERROR\n", 6) == 0) {
+        read_line(state, buffer, true);
+        fprintf(stderr, "STATUS_ERROR\n");
         print_error_message(buffer);
         exit(1);
     }
-    if(strcmp(buffer, "OK") != 0) {
+    if(strncmp(buffer, "OK\n", 3) != 0) {
         print_invalid_response();
         exit(1);
     }
+    fprintf(stderr, "STATUS_OK\n");
+}
+
+void handle_list_response(char* pBuffer, size_t bytes_left, int sock) {
+    ReadState state;
+    start_read(&state, pBuffer, bytes_left, sock);
+    char buffer[MAX_BUF_SIZE];
+    read_line(&state, buffer, true);
+    print_response_status(&state, buffer);
     size_t size = read_size(&state);
     size_t count = 0;
+    
+    fprintf(stderr, "Expecting %zu bytes from server\n", size);
     do
     {
         int c = read_next(&state);
@@ -143,22 +160,16 @@ void handle_list_response(char* pBuffer, size_t bytes_left, int sock) {
         print_received_too_much_data();
         exit(1);
     }
+    
+    fprintf(stderr, "Received %zu bytes from server\n", count);
 }
 
 void handle_delete_response(char* pBuffer, size_t bytes_left, int sock) {
     ReadState state;
     start_read(&state, pBuffer, bytes_left, sock);
-    char buffer[BUFSIZ];
+    char buffer[MAX_BUF_SIZE];
     read_line(&state, buffer, true);
-    if(strcmp(buffer, "ERROR") == 0) {
-        read_line(&state, buffer, true);
-        print_error_message(buffer);
-        exit(1);
-    }
-    if(strcmp(buffer, "OK") != 0) {
-        print_invalid_response();
-        exit(1);
-    }
+    print_response_status(&state, buffer);
     int c = read_next(&state);
     if(c != MY_EOF && c != 0) {
         print_received_too_much_data();
@@ -166,57 +177,86 @@ void handle_delete_response(char* pBuffer, size_t bytes_left, int sock) {
     }
 }
 
+static void write_all(FILE* f, char* buffer, size_t size) {
+    if(size == 0)
+        return;
+    
+    size_t bytes_sent = 0;
+    do
+    {
+        int count;
+        count = fwrite(&buffer[bytes_sent], 1, size - bytes_sent, f);
+        if(count < 0) {
+            print_error_message("Output file");
+            return;
+        }
+        if(count == 0) {
+            print_error_message("Output write failed");
+            return;
+        }
+        bytes_sent += count;
+    } while (bytes_sent < size);
+}
+
 void handle_get_response(char* pBuffer, size_t bytes_left, int sock, char* filename) {
     ReadState state;
+    memset(&state, 0, sizeof(state));
     start_read(&state, pBuffer, bytes_left, sock);
-    char buffer[BUFSIZ];
+    char buffer[MAX_BUF_SIZE] = "";
+    fprintf(stderr, "processing response\n");
     read_line(&state, buffer, true);
-    if(strncmp(buffer, "ERROR", 6) == 0) {
-        read_line(&state, buffer, true);
-        print_error_message(buffer);
-        exit(1);
-    }
-    if(strncmp(buffer, "OK", 3) != 0) {
-        print_invalid_response();
-        exit(1);
-    }
+    print_response_status(&state, buffer);
+    
     FILE* output = fopen(filename, "wb");
     if(output == NULL) {
-        printf("Can't open %s for writing\n", filename);
+        fprintf(stderr, "Can't open %s for writing\n", filename);
         exit(1);
     }
     size_t size = read_size(&state);
-    size_t count = 0;
-    do
-    {
-        int c = read_next(&state);
-        if(c == MY_EOF) {
-            print_too_little_data();
+    size_t readcount = 0;
+
+    fprintf(stderr, "Expecting %zu bytes from server\n", size);
+
+    write_all(output, state.pNext, state.bytes_left);
+    readcount = state.bytes_left;
+
+    while(1) {
+        
+        int count = read(state.sock, state.inputBuffer, MAX_BUF_SIZE);
+        if(count == 0) {
+            state.end = true;
+            break;
+        }
+        if(count == -1) {
+            print_connection_closed();
+            fclose(output);
             exit(1);
         }
-        fputc(c, output);
-        count++;
-    } while (count < size);
-    int c = read_next(&state);
-    if(c != MY_EOF && c != 0) {
-        print_received_too_much_data();
-        exit(1);
+
+        readcount += count;
+        if( readcount > size ) {
+            print_received_too_much_data();
+            fclose(output);
+            exit(1);
+        }
+        write_all(output, state.inputBuffer, count);
+        
     }
+        
+    if( readcount < size ) {
+        print_too_little_data();
+    }
+
+    fprintf(stderr, "received %zu bytes from server\n", readcount);
+    fclose(output);
 }
 void handle_put_response(char* pBuffer, size_t bytes_left, int sock) {
     ReadState state;
     start_read(&state, pBuffer, bytes_left, sock);
-    char buffer[BUFSIZ];
+    fprintf(stderr, "processing response\n");
+    char buffer[MAX_BUF_SIZE];
     read_line(&state, buffer, true);
-    if(strncmp(buffer, "ERROR", 6) == 0) {
-        read_line(&state, buffer, true);
-        print_error_message(buffer);
-        exit(1);
-    }
-    if(strncmp(buffer, "OK", 3) != 0) {
-        print_invalid_response();
-        exit(1);
-    }
+    print_response_status(&state, buffer);
     int c = read_next(&state);
     if(c != MY_EOF && c != 0) {
         print_received_too_much_data();
@@ -277,9 +317,9 @@ s_response* parse_server_response(char* buffer, size_t* off){
 
 void printBuffer(const char *buffer, size_t size) {
     for (size_t i = 0; i < size; i++) {
-        printf("%02X ", (unsigned char)buffer[i]); // Prints in hexadecimal format
+        fprintf(stderr, "%02X ", (unsigned char)buffer[i]); // Prints in hexadecimal format
     }
-    printf("\n");
+    fprintf(stderr, "\n");
 }
 
 void create_message(char* buffer, char* verb_as_char, char* filename){
@@ -292,149 +332,67 @@ void create_message(char* buffer, char* verb_as_char, char* filename){
 void send_file(char* filename, int sock) {
     struct stat file_info;
     stat(filename, &file_info);
+
+    fprintf(stderr, "File size: %zu\n", file_info.st_size);
+    
     FILE* f = fopen(filename, "rb");
     if(f == NULL) {
-        printf("Can't open file %s\n", filename);
+        fprintf(stderr, "Can't open file %s\n", filename);
         exit(1);
-    }
-    size_t filesize = file_info.st_size;
-    if(send(sock, &filesize, sizeof(size_t), 0) <= 0) {
-        printf("send failed\n");
     }
 
     size_t bytes_written = 0;
-    char buffer[BUFSIZ];
+    char buffer[MAX_BUF_SIZE];
+    memcpy(buffer, &file_info.st_size, sizeof(size_t));
+    send_all(buffer, sizeof(size_t), sock);
+    
     do
     {
-        size_t count = fread(buffer, 1, BUFSIZ, f);
+        size_t count = fread(buffer, 1, MAX_BUF_SIZE, f);
         if(count == 0 || ferror(f)) {
-            printf("error reading file");
+            fprintf(stderr, "error reading file");
             fclose(f);
             exit(1);
         }
-        bytes_written += count;
         send_all(buffer, count, sock);
-    } while (bytes_written < filesize);
+        bytes_written += count;
+    } while (bytes_written < (size_t)file_info.st_size);
     fclose(f);
+
+    fprintf(stderr, "Sent %zu bytes of file\n", bytes_written);
 }
 
-/* reading waiting errors on the socket
- * return 0 if there's no, 1 otherwise
- */
-static int socket_check(int fd)
-{
-   int ret;
-   int code;
-   socklen_t len = sizeof(int);
-
-   ret = getsockopt(fd, SOL_SOCKET, SO_ERROR, &code, &len);
-
-   if ((ret || code)!= 0)
-      return 1;
-
-   return 0;
-}
-
-/* create a TCP socket with non blocking options and connect it to the target
-* if succeed, add the socket in the epoll list and exit with 0
-*/
-static int create_and_connect( struct sockaddr_in target , int epfd)
-{
-   int yes = 1;
-   int sock;
-
-   // epoll mask that contain the list of epoll events attached to a network socket
-   static struct epoll_event Edgvent;
-
-
-   if( (sock = socket(AF_INET, SOCK_STREAM, 0)) < 0)
-   {
-      perror("socket");
-      exit(1);
-   }
-
-   // set socket to non blocking and allow port reuse
-   if ( (setsockopt(sock,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof(int)) < 0 ||
-      (fcntl(sock, F_SETFL, O_NONBLOCK)) == -1) )
-   {
-      perror("setsockopt || fcntl");
-      exit(1);
-   }
-
-   if( connect(sock, (struct sockaddr *)&target, sizeof(struct sockaddr)) == -1
-      && errno != EINPROGRESS)
-   {
-      // connect doesn't work, are we running out of available ports ? if yes, destruct the socket
-      if (errno == EAGAIN)
-      {
-         perror("connect is EAGAIN");
-         close(sock);
-         exit(1);
-      }
-   }
-   else
-   {
-      /* epoll will wake up for the following events :
-       *
-       * EPOLLIN : The associated file is available for read(2) operations.
-       *
-       * EPOLLOUT : The associated file is available for write(2) operations.
-       *
-       * EPOLLRDHUP : Stream socket peer closed connection, or shut down writing 
-       * half of connection. (This flag is especially useful for writing simple 
-       * code to detect peer shutdown when using Edge Triggered monitoring.)
-       *
-       * EPOLLERR : Error condition happened on the associated file descriptor. 
-       * epoll_wait(2) will always wait for this event; it is not necessary to set it in events.
-       */
-      Edgvent.events = EPOLLOUT | EPOLLIN | EPOLLRDHUP | EPOLLERR | EPOLLET ;
-      //Edgvent.events = EPOLLOUT | EPOLLIN | EPOLLRDHUP | EPOLLERR;
-
-      Edgvent.data.fd = sock;
-
-      // add the socket to the epoll file descriptors
-      if(epoll_ctl(epfd, EPOLL_CTL_ADD, sock, &Edgvent) != 0)
-      {
-         perror("epoll_ctl, adding socket\n");
-         exit(1);
-      }
-   }
-
-   return 0;
-}
 
 int main(int argc, char **argv) {
-    char** args = parse_args(argc, argv);
-    if(args == NULL){
+    char *host = strtok(argv[1], ":");
+    char *strport = strtok(NULL, ":");
+    if (strport == NULL) {
         print_client_help();
         return -1;
     }
-    char* host = args[0];
-    int port = atoi(args[1]);
-    char* verb_as_char = args[2];
-    verb _verb = check_args(args);
+    int port = atoi(strport);
+    char* verb_as_char = argv[2];
+    verb _verb = check_args(argv);
     char* firstFile = NULL;
     char* secondFile = NULL;
     if(argc > 3){
-        firstFile = args[3];
-        secondFile = args[3];
+        firstFile = argv[3];
+        secondFile = argv[3];
     }
     if(argc > 4){
-        secondFile = args[4];
+        secondFile = argv[4];
     }
 
-    // the epoll file descriptor
-    int epfd;
-
-    // epoll structure that will contain the current network socket and event when epoll wakes up
-    static struct epoll_event *events;
-    static struct epoll_event event_mask;
-
-    //int sock = 0;
+    int sock = 0;
     struct sockaddr_in serv_addr;
-    char buffer[BUFSIZ] = {0};
+    char buffer[MAX_BUF_SIZE] = {0};
 
-    int maxconn = 1;
+    // Creating a socket
+    if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+        print_error_message("Socket creation error");
+        return -1;
+    }
+    
     int errcode;
     struct addrinfo hints, *res, *result;
     void *ptr;
@@ -482,174 +440,63 @@ int main(int argc, char **argv) {
         return -1;
     }
 
-    // create the special epoll file descriptor
-    epfd = epoll_create(maxconn);
-
-    // allocate enough memory to store all the events in the "events" structure
-    if (NULL == (events = calloc(maxconn, sizeof(struct epoll_event))))
-    {
-        perror("calloc events");
-        exit(1);
-    };
-
-    if(create_and_connect(serv_addr, epfd) != 0)
-    {
-        perror("create and connect");
-        exit(1);
+    // Connecting to the server
+    if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
+        print_error_message("Connection failed");
+        return -1;
     }
 
-    int count, i;
+    create_message(buffer, verb_as_char, firstFile);
+    send_all(buffer, strlen(buffer), sock);
+    if(_verb == PUT){
+        send_file(secondFile, sock);
+    }
 
-    do
-   {
-      /* wait for events on the file descriptors added into epfd
-       *
-       * if one of the socket that's contained into epfd is available for reading, writing,
-       * is closed or have an error, this socket will be return in events[i].data.fd
-       * and events[i].events will be set to the corresponding event
-       *
-       * count contain the number of returned events
-       */
-        count = epoll_wait(epfd, events, maxconn, 1000);
-        for(i=0;i<count;i++)
-        {
-            if (events[i].events & EPOLLOUT) //socket is ready for writing
-            {
-                // verify the socket is connected and doesn't return an error
-                if(socket_check(events[i].data.fd) != 0)
-                {
-                   perror("write socket_check");
-                   close(events[i].data.fd);
-                   continue;
-                }
-                else
-                {
-                    create_message(buffer, verb_as_char, firstFile);
-                    send_all(buffer, strlen(buffer), events[i].data.fd);
-                    if(_verb == PUT){
-                        send_file(secondFile, events[i].data.fd);
-                    }
-                    
-                    /* we just wrote on this socket, we don't want to write on it anymore
-                    * but we still want to read on it, so we modify the event mask to
-                    * remove EPOLLOUT from the events list
-                    */
-                    event_mask.events = EPOLLIN | EPOLLRDHUP | EPOLLERR | EPOLLET;
-                    event_mask.data.fd = events[i].data.fd;
+    struct pollfd fds[1];
+    int timeout = 10; // ms
+    fds[0].fd = sock;
+    fds[0].events = POLLIN|POLLPRI;
+    fds[0].revents = 0;
+    int pollres = poll(fds, 1, timeout);
+    if (pollres == 0)
+    {
+        //fprintf(stderr, "poll timeout\n");
+        printf("processing response\nSTATUS_OK\n");
+        print_success();
+        return 0;
+    } else if (pollres < 0) {
+        fprintf(stderr, "error in poll\n");
+        return MY_EOF;
+    }
 
-                    if(epoll_ctl(epfd, EPOLL_CTL_MOD, events[i].data.fd, &event_mask) != 0)
-                    {
-                        perror("epoll_ctl, modify socket\n");
-                        exit(1);
-                    }
-                }
-            }
-        
-            if (events[i].events & EPOLLIN) //socket is ready for writing
-            {
-                // verify the socket is connected and doesn't return an error
-                if(socket_check(events[i].data.fd) != 0)
-                {
-                   perror("read socket_check");
-                   close(events[i].data.fd);
-                   continue;
-                }
-                else 
-                {
-                    // Receiving the message from the server
-                    int recvCount = read(events[i].data.fd, buffer, BUFSIZ); 
-                    if ( recvCount < 0) {
-                        print_error_message("Read error");
-                        close(events[i].data.fd);
-                        return -1;
-                    }
+    // Receiving the message from the server
+    int recvCount = read(sock, buffer, MAX_BUF_SIZE); 
+    if ( recvCount < 0) {
+        print_error_message("Read error");
+        return -1;
+    }
 
-                    if(_verb == LIST) {
-                        handle_list_response(buffer, recvCount, events[i].data.fd);
-                        close(events[i].data.fd);
-                        exit(0);
-                    }
-                    if(_verb == DELETE) {
-                        handle_delete_response(buffer, recvCount, events[i].data.fd);
-                        print_success();
-                        close(events[i].data.fd);
-                        exit(0);
-                    }
-                    if(_verb == GET) {
-                        handle_get_response(buffer, recvCount, events[i].data.fd, secondFile);
-                        close(events[i].data.fd);
-                        exit(0);
-                    }
-                    if(_verb == PUT) {
-                        handle_put_response(buffer, recvCount, events[i].data.fd);
-                        print_success();
-                        close(events[i].data.fd);
-                        exit(0);
-                    }
-                }
-            }
-            if (events[i].events & (EPOLLRDHUP | EPOLLHUP)) //socket closed
-            {
-                // socket is closed, remove the socket from epoll and create a new one
-                epoll_ctl(epfd, EPOLL_CTL_DEL, events[i].data.fd, NULL);
-
-                if(close(events[i].data.fd)!=0)
-                {
-                   perror("close");
-                   continue;
-                }
-            }
-
-            if (events[i].events & EPOLLERR)
-            {
-                perror("epoll");
-                continue;
-            }
-        }
-
-    } while(1);
-
+    if(_verb == LIST) {
+        handle_list_response(buffer, recvCount, sock);
+        exit(0);
+    }
+    if(_verb == DELETE) {
+        handle_delete_response(buffer, recvCount, sock);
+        print_success();
+        exit(0);
+    }
+    if(_verb == GET) {
+        handle_get_response(buffer, recvCount, sock, secondFile);
+        exit(0);
+    }
+    if(_verb == PUT) {
+        handle_put_response(buffer, recvCount, sock);
+        print_success();
+        exit(0);
+    }
+    close(sock);
     print_client_usage();
     return 1;
-}
-
-/**
- * Given commandline argc and argv, parses argv.
- *
- * argc argc from main()
- * argv argv from main()
- *
- * Returns char* array in form of {host, port, method, remote, local, NULL}
- * where `method` is ALL CAPS
- */
-char **parse_args(int argc, char **argv) {
-    if (argc < 3) {
-        return NULL;
-    }
-
-    char *host = strtok(argv[1], ":");
-    char *port = strtok(NULL, ":");
-    if (port == NULL) {
-        return NULL;
-    }
-
-    char **args = (char**)calloc(1, 6 * sizeof(char *));
-    args[0] = host;
-    args[1] = port;
-    args[2] = argv[2];
-    char *temp = args[2];
-    while (*temp) {
-        *temp = toupper((unsigned char)*temp);
-        temp++;
-    }
-    if (argc > 3) {
-        args[3] = argv[3];
-    }
-    if (argc > 4) {
-        args[4] = argv[4];
-    }
-
-    return args;
 }
 
 /**
