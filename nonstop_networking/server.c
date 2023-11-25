@@ -119,7 +119,7 @@ typedef void (*sighandler_t) (int);
 
 static void print_usage(const char* progname)
 {
-  printf(
+  fprintf(stderr, 
       "Usage: %s <port>\n"
       "\n"
       "where <options>: \n"
@@ -613,9 +613,9 @@ create_and_bind (int portNum)
 
 void printBuffer(const char *buffer, size_t size) {
     for (size_t i = 0; i < size; i++) {
-        printf("%02X ", (unsigned char)buffer[i]); // Prints in hexadecimal format
+        fprintf(stderr, "%02X ", (unsigned char)buffer[i]); // Prints in hexadecimal format
     }
-    printf("\n");
+    fprintf(stderr, "\n");
 }
 
 void send_all(char* buffer, size_t size, int sock) {
@@ -663,7 +663,7 @@ void insert_size_into_mem(char* pBuffer, size_t size) {
 
 static void initialize()
 {
-    char base_path[] = "/tmp/nbn_tmpdir.XXXXXX";
+    char base_path[] = "XXXXXX";
 
     char *tmp_dir = mkdtemp(base_path);
     if(tmp_dir == NULL) {
@@ -673,6 +673,8 @@ static void initialize()
     print_temp_directory(tmp_dir);
     
     snprintf(base_temp_dir, sizeof(base_temp_dir), "%s", tmp_dir);
+
+    fprintf(stderr, "Storing files at '%s'\n", base_temp_dir);
 
     hashtable_ts_init(&sock_to_session_hashtable, NULL, "sock_to_session_hashtable");
 
@@ -688,7 +690,7 @@ static int parse_args(int argc, char* argv[])
     if(!strcmp(arg, "--verbose")) {
         verbose_flag = 1;
     } else {
-      	printf("%s: unknown parameter '%s'\n",argv[0],arg);
+      	fprintf(stderr, "%s: unknown parameter '%s'\n",argv[0],arg);
       print_usage(argv[0]);
       return -1;
     }
@@ -719,6 +721,8 @@ int main(int argc, char **argv) {
     int server_fd, s;
 
     initialize();
+
+    fprintf(stderr, "Listening on port %d\n\n", portNum);
 
     server_fd = create_and_bind (portNum);
     if (server_fd == -1)
