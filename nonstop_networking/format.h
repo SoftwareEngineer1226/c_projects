@@ -75,4 +75,9 @@ void print_temp_directory(char *temp_directory);
  * Used in server.c in the event that command line arguments are missing or
  * trivially wrong; prints basic usage information.
  */
+
+void print_nonexistent_verb();
+
+void print_Malformed_verb();
+
 void print_server_usage(void);

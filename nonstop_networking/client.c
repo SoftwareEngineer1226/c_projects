@@ -9,7 +9,7 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include <netdb.h>
-#include <poll.h>
+#include <signal.h>
 
 #include "common.h"
 
@@ -25,6 +25,12 @@ typedef struct {
     int sock;
     bool end;
 } ReadState;
+
+static int epipe = 0;
+static void handle_sigpipe()
+{
+  epipe = 1;
+}
 
 void send_all(char* buffer, size_t size, int sock) {
     size_t bytes_sent = 0;
@@ -63,21 +69,6 @@ int read_next(ReadState* state) {
         state->bytes_left--;
         return c;
     } else {
-/*        struct pollfd fds[1];
-        int timeout = 10; // ms
-        fds[0].fd = state->sock;
-        fds[0].events = POLLIN|POLLPRI;
-        fds[0].revents = 0;
-        int res = poll(fds, 1, timeout);
-        if (res == 0)
-        {
-            //fprintf(stderr, "poll timeout\n");
-            return 0;
-        } else if (res < 0) {
-            fprintf(stderr, "error in poll\n");
-            return MY_EOF;
-        }
-        */
         int count = read(state->sock, state->inputBuffer, MAX_BUF_SIZE);
         if(count == 0) {
             state->end = true;
@@ -97,8 +88,10 @@ void read_line(ReadState* state, char *pBuffer, bool formatError) {
     int c;
     while((c = read_next(state)) != MY_EOF) {
         *pBuffer++ = (char)c;
-        if(c == '\n' || c == '\0')
+        if(c == '\n' || c == '\0') {
+            *pBuffer = '\0';
             return;
+        }
     }
     if(formatError)
         print_invalid_response();
@@ -145,7 +138,7 @@ void handle_list_response(char* pBuffer, size_t bytes_left, int sock) {
     size_t count = 0;
     
     fprintf(stderr, "Expecting %zu bytes from server\n", size);
-    do
+    while (count < size)
     {
         int c = read_next(&state);
         if(c == MY_EOF) {
@@ -154,7 +147,7 @@ void handle_list_response(char* pBuffer, size_t bytes_left, int sock) {
         }
         putchar(c);
         count++;
-    } while (count < size);
+    } 
     int c = read_next(&state);
     if(c != MY_EOF && c != 0) {
         print_received_too_much_data();
@@ -202,8 +195,7 @@ void handle_get_response(char* pBuffer, size_t bytes_left, int sock, char* filen
     ReadState state;
     memset(&state, 0, sizeof(state));
     start_read(&state, pBuffer, bytes_left, sock);
-    char buffer[MAX_BUF_SIZE] = "";
-    fprintf(stderr, "processing response\n");
+    char buffer[81920] = "";
     read_line(&state, buffer, true);
     print_response_status(&state, buffer);
     
@@ -222,7 +214,7 @@ void handle_get_response(char* pBuffer, size_t bytes_left, int sock, char* filen
 
     while(1) {
         
-        int count = read(state.sock, state.inputBuffer, MAX_BUF_SIZE);
+        int count = read(state.sock, buffer, sizeof(buffer));
         if(count == 0) {
             state.end = true;
             break;
@@ -239,7 +231,7 @@ void handle_get_response(char* pBuffer, size_t bytes_left, int sock, char* filen
             fclose(output);
             exit(1);
         }
-        write_all(output, state.inputBuffer, count);
+        write_all(output, buffer, count);
         
     }
         
@@ -250,10 +242,10 @@ void handle_get_response(char* pBuffer, size_t bytes_left, int sock, char* filen
     fprintf(stderr, "received %zu bytes from server\n", readcount);
     fclose(output);
 }
+
 void handle_put_response(char* pBuffer, size_t bytes_left, int sock) {
     ReadState state;
     start_read(&state, pBuffer, bytes_left, sock);
-    fprintf(stderr, "processing response\n");
     char buffer[MAX_BUF_SIZE];
     read_line(&state, buffer, true);
     print_response_status(&state, buffer);
@@ -362,10 +354,12 @@ void send_file(char* filename, int sock) {
     fprintf(stderr, "Sent %zu bytes of file\n", bytes_written);
 }
 
-
 int main(int argc, char **argv) {
     char *host = strtok(argv[1], ":");
     char *strport = strtok(NULL, ":");
+
+    signal(SIGPIPE, handle_sigpipe);
+    
     if (strport == NULL) {
         print_client_help();
         return -1;
@@ -452,22 +446,14 @@ int main(int argc, char **argv) {
         send_file(secondFile, sock);
     }
 
-    struct pollfd fds[1];
-    int timeout = 10; // ms
-    fds[0].fd = sock;
-    fds[0].events = POLLIN|POLLPRI;
-    fds[0].revents = 0;
-    int pollres = poll(fds, 1, timeout);
-    if (pollres == 0)
+    if ( shutdown(sock, 1) == -1 )
     {
-        //fprintf(stderr, "poll timeout\n");
-        printf("processing response\nSTATUS_OK\n");
-        print_success();
-        return 0;
-    } else if (pollres < 0) {
-        fprintf(stderr, "error in poll\n");
-        return MY_EOF;
+      perror("shutdown: ");
+      if ( !epipe )
+        exit(1);
     }
+
+    fprintf(stderr, "processing response\n");
 
     // Receiving the message from the server
     int recvCount = read(sock, buffer, MAX_BUF_SIZE); 

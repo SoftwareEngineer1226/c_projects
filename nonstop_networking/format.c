@@ -38,6 +38,14 @@ void print_error_message(char *err) {
     printf("%s\n", err);
 }
 
+void print_nonexistent_verb() {
+    printf("Unknown request\n");
+}
+
+void print_Malformed_verb() {
+    printf("Malformed request\n");
+}
+
 void print_invalid_response() {
     printf("Invalid response\n");
 }

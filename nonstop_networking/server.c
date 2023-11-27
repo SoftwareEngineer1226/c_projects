@@ -231,20 +231,39 @@ int remove_directory(const char *path) {
    return r;
 }
 
+static void send_malformed_response(Session *session)
+{
+    print_Malformed_verb();
+    char errmsg[BUFSIZ];
+    sprintf(errmsg, "ERROR\nMarlformed Request\n");
+    send_all(errmsg, strlen(errmsg), session->stream.socket);
+    session->state = STATE_DONE;
+    session->status = STATUS_SESSION_ERROR;
+}
+
 bool TryParse(Session* session, char* cmd, bool hasFilename) {
     size_t cmdLen = strlen(cmd);
+
     if(strncmp(session->input, cmd, cmdLen) != 0)
         return false;
 
     if(hasFilename) {
-        if(session->input[cmdLen] != ' ') 
+        if(session->input[cmdLen] != ' ') {
+            send_malformed_response(session);
             return false;
+        }
         char* nl = strchr(session->input, '\n');
-        if(nl == NULL)
+        if(nl == NULL) {
+            send_malformed_response(session);
             return false;
+        }
         char* filenameStart = &session->input[cmdLen+1];
         strncpy(session->filename, filenameStart, nl - filenameStart);
         session->filename[nl - filenameStart] = '\0';
+        if(strlen(session->filename) == 0) {
+            send_malformed_response(session);
+            return false;
+        }
     }
         
     return true;
@@ -272,7 +291,29 @@ bool continue_reading_header(Session* session) {
         session_start_put(session, 3);
     else if(TryParse(session, "DELETE", true))
         session_start_delete(session);
-    
+    else if(session->state == STATE_READING_HEADER) {
+        int err = 0;
+        if(session->input[0] != 'G' && session->input[0] != 'P' && session->input[0] != 'L' && session->input[0] != 'D')
+            err = 1;
+        else if(session->inputPos >=3 && session->input[0] == 'G' && strncmp(session->input, "GET", 3) )
+            err = 1;
+        else if(session->inputPos >=3 && session->input[0] == 'P' && strncmp(session->input, "PUT", 3) )
+            err = 1;
+        else if(session->inputPos >=4 && session->input[0] == 'L' && strncmp(session->input, "LIST", 4) )
+            err = 1;
+        else if(session->inputPos >=6 && session->input[0] == 'D' && strncmp(session->input, "DELETE", 6) )
+            err = 1;
+
+        if(err) {
+            print_nonexistent_verb();
+            char errmsg[BUFSIZ];
+            sprintf(errmsg, "ERROR\nUnknown Request\n");
+            send_all(errmsg, strlen(errmsg), session->stream.socket);
+            session->state = STATE_DONE;
+            session->status = STATUS_SESSION_ERROR;
+            return false;
+        }
+    }
     return false;//Session_has_more(&session->stream);
 }
 
@@ -293,13 +334,12 @@ bool continue_reading_put(Session* session)
     write_all(session->fd, session->stream.buffer, session->stream.bytesInBuffer);
     session->totalWritten += session->stream.bytesInBuffer;
 
-    if(session->totalWritten == session->totalBytesForPut) {
-        sending_put_response(session, "OK\n");
-        session->state = STATE_DONE;
-    } else if(session->totalWritten > session->totalBytesForPut) { // for short content
+    if(session->totalWritten > session->totalBytesForPut) { // for short content
         sending_put_response(session, "ERROR\nReceived too mush data\n");
+        print_received_too_much_data();
         session->state = STATE_DONE;
     }
+
     return false;
 }
 
@@ -419,7 +459,7 @@ void session_start_list(Session *session)
     VECTOR_FOR_EACH(directory, diritem, {
         sizeCount += strlen(diritem) + 1; // +1 for the newline
     });
-    sizeCount++; // Add one for the end null character;
+    
     session->listData = calloc(1, sizeCount);
     if(session->listData == NULL) {
         print_error_message("calloc failed");
@@ -435,7 +475,6 @@ void session_start_list(Session *session)
         end[len] = '\n';
         end += len + 1;
     });
-    *end = '\0';
 
     // Set up the header
     strcpy(buffer, "OK\n12345678"); // Note we will overwrite 12345678 with a size_t
@@ -628,11 +667,11 @@ void send_all(char* buffer, size_t size, int sock) {
             if (errno == EAGAIN || errno == EWOULDBLOCK)
                 continue;
             
-            print_error_message("Client socket:");
+            //print_error_message("Client socket:");
             return;
         }
         if(count == 0) {
-            print_error_message("Client disconnected\n");
+            //print_error_message("Client disconnected\n");
             return;
         }
         bytes_sent += count;
@@ -696,6 +735,18 @@ static int parse_args(int argc, char* argv[])
     }
   }
   return 0;
+}
+
+static void end_session(int sock)
+{
+    LOG ("Closed connection on descriptor %d\n",
+            sock);
+
+    close (sock);
+
+    uint32_t keyP = sock;
+    hashtable_ts_free(&sock_to_session_hashtable, keyP);
+
 }
 
 int main(int argc, char **argv) {
@@ -857,15 +908,13 @@ int main(int argc, char **argv) {
                             if (errno != EAGAIN)
                             {
                                 perror ("read");
-                                if(session->state != STATE_SENDING_GET)
-                                    done = 1;
+                                done = 1;
                             }
                             break;
                         } else if (bytesRead == 0) {
                             /* End of file. The remote has closed the
                                connection. */
-                            if(session->state != STATE_SENDING_GET)
-                                done = 1;
+                            done = 1;
                             break;
                         }
 
@@ -885,27 +934,18 @@ int main(int argc, char **argv) {
                     if(session && session->state == STATE_READING_PUT && done) {
                         if(session->totalWritten < session->totalBytesForPut) {
                             sending_put_response(session, "ERROR\nReceived too little data\n");
+                            print_too_little_data();
+                            session->state = STATE_DONE;
+                        } else if(session->totalWritten == session->totalBytesForPut) {
+                            sending_put_response(session, "OK\n");
                             session->state = STATE_DONE;
                         }
-                    }
-                    
-                    if (session && session->state != STATE_SENDING_GET && done)
+                        end_session(events[i].data.fd);
+                    } else if (session && session->state != STATE_SENDING_GET && done)
                     {
-                        LOG ("Closed connection on descriptor %d\n",
-                                events[i].data.fd);
-
-                        close (events[i].data.fd);
-
-                        uint32_t keyP = events[i].data.fd;
-                        hashtable_ts_free(&sock_to_session_hashtable, keyP);
+                        end_session(events[i].data.fd);
                     } else if(session && (session->status == STATUS_SESSION_END || session->status == STATUS_SESSION_ERROR)) {
-                        LOG ("Closed connection on descriptor %d\n",
-                                events[i].data.fd);
-
-                        close (events[i].data.fd);
-
-                        uint32_t keyP = events[i].data.fd;
-                        hashtable_ts_free(&sock_to_session_hashtable, keyP);
+                        end_session(events[i].data.fd);
                     }
                         
                 }
