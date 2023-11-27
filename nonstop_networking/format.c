@@ -23,7 +23,7 @@ void print_client_usage() {
 
 void print_client_help() {
     print_client_usage();
-    fprintf(stderr, "Methods:\n \
+    printf("Methods:\n \
         LIST\t\t\tRequests a list of files on the server.\n \
         PUT <remote> <local>\tUploads <local> file to serve as filename <remote>.\n \
         GET <remote>\t\tDownloads file named <remote> from server.\n \
@@ -36,14 +36,6 @@ void print_connection_closed() {
 
 void print_error_message(char *err) {
     printf("%s\n", err);
-}
-
-void print_nonexistent_verb() {
-    printf("Unknown request\n");
-}
-
-void print_Malformed_verb() {
-    printf("Malformed request\n");
 }
 
 void print_invalid_response() {

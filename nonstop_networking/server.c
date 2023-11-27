@@ -115,6 +115,9 @@ int remove_directory(const char *path);
 int set_sighandler(sighandler_t sig_usr);
 int exist_in_vector(vector* vector, char *filename);
 
+void print_nonexistent_verb();
+void print_Malformed_verb();
+
 typedef void (*sighandler_t) (int);
 
 static void print_usage(const char* progname)
@@ -229,6 +232,14 @@ int remove_directory(const char *path) {
       r = rmdir(path);
 
    return r;
+}
+
+void print_nonexistent_verb() {
+    printf("Unknown request\n");
+}
+
+void print_Malformed_verb() {
+    printf("Malformed request\n");
 }
 
 static void send_malformed_response(Session *session)
