@@ -19,7 +19,7 @@ static int prempt;
 static int numarr;
 static int numfin;
 static int currenttime;
-static int seq;
+
 /**
  * The struct to hold the information about a given job
  */
@@ -30,8 +30,7 @@ typedef struct _job_info {
     double arrivetime;
     double timeremaining;
     double starttime;
-    double sequence;
-
+    double lastTimeRun;
     /* TODO: Add any other information and bookkeeping you need into this
      * struct. */
 } job_info;
@@ -73,7 +72,6 @@ void scheduler_start_up(scheme_t s) {
     totalwait = 0;
     totalturnaround = 0;
     currenttime = -1;
-    seq = 0;
 }
 
 static int break_tie(const void *a, const void *b) {
@@ -118,9 +116,9 @@ int comparer_psrtf(const void *a, const void *b) {
 
 int comparer_rr(const void *a, const void *b) {
     // TODO: Implement me!
-    if (((job_info*)((job*)a)->metadata) ->sequence < ((job_info*)((job*)b)->metadata)->sequence) {
+    if (((job_info*)((job*)a)->metadata) ->lastTimeRun < ((job_info*)((job*)b)->metadata)->lastTimeRun) {
         return -1;
-    } else if (((job_info*)((job*)a)->metadata) ->sequence > ((job_info*)((job*)b)->metadata)->sequence){
+    } else if (((job_info*)((job*)a)->metadata) ->lastTimeRun > ((job_info*)((job*)b)->metadata)->lastTimeRun){
         return 1;
     }
     return break_tie(a, b);
@@ -148,8 +146,7 @@ void scheduler_new_job(job *newjob, int job_number, double time,
     info->arrivetime = time;
     info->timeremaining = sched_data->running_time;
     info->starttime = 0;
-    info->sequence = seq;
-    seq ++;
+    info->lastTimeRun = 0;
     newjob->metadata = info;
     numarr += 1;
     priqueue_offer(&pqueue, newjob);
@@ -165,8 +162,7 @@ job *scheduler_quantum_expired(job *job_evicted, double time) {
         return job_evicted;
     }
     if (job_evicted) {
-        ((job_info*)((job*)job_evicted)->metadata) ->sequence = seq;
-        seq ++;
+        ((job_info*)((job*)job_evicted)->metadata) ->lastTimeRun = time;
         priqueue_offer(&pqueue, job_evicted);
     }
     job* next = priqueue_poll(&pqueue);
