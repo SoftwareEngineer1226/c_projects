@@ -1,7 +1,3 @@
-/**
- * ideal_indirection
- * CS 341 - Fall 2023
- */
 #include "page_table.h"
 #include "segments.h"
 

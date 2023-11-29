@@ -1,8 +1,4 @@
 /**
- * ideal_indirection
- * CS 341 - Fall 2023
- */
-/**
  * kernel.h - Implementation of a simulated kernel.
  */
 #pragma once

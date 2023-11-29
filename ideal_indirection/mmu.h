@@ -1,8 +1,4 @@
 /**
- * ideal_indirection
- * CS 341 - Fall 2023
- */
-/**
  * mmu.h - the implementation of a Memory Management Unit (MMU).
  */
 #pragma once

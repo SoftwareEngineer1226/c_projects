@@ -1,8 +1,4 @@
 /**
- * ideal_indirection
- * CS 341 - Fall 2023
- */
-/**
  * page_table.h - Definition of a page table and its entries.
  */
 #pragma once

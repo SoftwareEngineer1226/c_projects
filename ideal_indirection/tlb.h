@@ -1,8 +1,4 @@
 /**
- * ideal_indirection
- * CS 341 - Fall 2023
- */
-/**
  * tlb.h - An implementation of the Translation Lookaside Buffer (TLB).
  */
 #pragma once

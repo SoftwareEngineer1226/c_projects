@@ -23,13 +23,6 @@ CFLAGS_DEBUG = $(CFLAGS_COMMON) -O0 -g
 LD = clang
 LDFLAGS = -lm
 
-IS_VM=$(shell hostname | grep "cs341")
-VM_OVERRIDE=$(shell echo $$HOSTNAME)
-ifeq ($(IS_VM),)
-ifneq ($(VM_OVERRIDE),cs241grader)
-$(error This assignment must be compiled on the CS341 VMs)
-endif
-endif
 
 
 .PHONY: all

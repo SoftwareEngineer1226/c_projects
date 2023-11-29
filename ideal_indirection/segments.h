@@ -1,8 +1,4 @@
 /**
- * ideal_indirection
- * CS 341 - Fall 2023
- */
-/**
  * segments.h - defines the various segments in a virtual memory space.
  */
 #pragma once

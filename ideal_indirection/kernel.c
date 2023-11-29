@@ -1,7 +1,3 @@
-/**
- * ideal_indirection
- * CS 341 - Fall 2023
- */
 #include "kernel.h"
 #include <assert.h>
 #include <dirent.h>
