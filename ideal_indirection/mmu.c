@@ -17,6 +17,28 @@ void mmu_read_from_virtual_address(mmu *this, addr32 virtual_address,
     assert(pid < MAX_PROCESS_ID);
     assert(num_bytes + (virtual_address % PAGE_SIZE) <= PAGE_SIZE);
     // TODO: Implement me!
+
+    //Start by following the pseudocode below:
+    //o Use pid to check for a context switch. If there was a switch, flush the TLB
+    //o Make sure that the address is in one of the segmentations. If not, raise a segfault and return
+    //o Check the TLB for the page table entry. If it’s not there:
+        //▪ Raise a TLB miss
+        //▪ Get the page directory entry. If it’s not present in memory:
+        //▪ Raise a page fault
+        //▪ Ask the kernel for a frame
+        //▪ Update the page directory entry’s present, read_write, and user_supervisor flags
+        //▪ Get the page table using the PDE
+        //▪ Get the page table entry from the page table. Add the entry to the TLB
+    //o If the page table entry is not present in memory:
+        //▪ Raise a page fault
+        //▪ Ask the kernel for a frame
+        //▪ Update the page table entry’s present, read_write, and user_supervisor flags
+        //▪ Read the page from disk
+
+    //o Check that the user has permission to perform the read or write operation. If not, raise a segfault and return
+    //o Use the page table entry’s base address and the offset of the virtual address to compute the physical address. Get a physical pointer from this address
+    //o Perform the read or write operation
+    //o Mark the PTE as accessed. If writing, also mark it as dirty.
 }
 
 void mmu_write_to_virtual_address(mmu *this, addr32 virtual_address, size_t pid,
