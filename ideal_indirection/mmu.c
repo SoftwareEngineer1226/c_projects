@@ -22,6 +22,7 @@ void mmu_read_from_virtual_address(mmu *this, addr32 virtual_address,
     //o Use pid to check for a context switch. If there was a switch, flush the TLB
     if (pid != this->curr_pid) {
         tlb_flush(&this->tlb);
+        this->curr_pid = pid;
     }
     //o Make sure that the address is in one of the segmentations. If not, raise a segfault and return
     if (!address_in_segmentations(this->segmentations[pid], virtual_address)) {
@@ -29,7 +30,7 @@ void mmu_read_from_virtual_address(mmu *this, addr32 virtual_address,
         return;
     }
     //o Check the TLB for the page table entry. If it’s not there:
-    addr32 base_virt_addr = virtual_address >> NUM_OFFSET_BITS;
+    addr32 base_virt_addr = virtual_address & 0xFFFFF000;
     page_table_entry *pte = tlb_get_pte(&this->tlb, base_virt_addr);
     if (!pte) {
         //▪ Raise a TLB miss
@@ -45,20 +46,42 @@ void mmu_read_from_virtual_address(mmu *this, addr32 virtual_address,
             //▪ Ask the kernel for a frame
             pde->base_addr = (ask_kernel_for_frame(NULL) >> NUM_OFFSET_BITS);
             //▪ Update the page directory entry’s present, read_write, and user_supervisor flags
+            pde->present = true;
+            pde->read_write = true;
+            pde->user_supervisor = true;
         }
         //▪ Get the page table using the PDE
+        page_table *page_tab = (page_table*) get_system_pointer_from_pde(pde);
         //▪ Get the page table entry from the page table. Add the entry to the TLB
+        addr32 pte_base = (virtual_address & 0x003FF000) >> NUM_OFFSET_BITS;
+        pte = &(page_tab->entries[pte_base]);
+        tlb_add_pte(&this->tlb, base_virt_addr, pte);
     }
     //o If the page table entry is not present in memory:
+    if (!pte->present) {
         //▪ Raise a page fault
+        mmu_raise_page_fault(this);
         //▪ Ask the kernel for a frame
+        pte->base_addr = (ask_kernel_for_frame(pte) >> NUM_OFFSET_BITS);
         //▪ Update the page table entry’s present, read_write, and user_supervisor flags
+        pte->present = true;
+        pte->read_write = true;
+        pte->user_supervisor = true;
         //▪ Read the page from disk
-
+        read_page_from_disk((page_table_entry*) pte);
+    }
     //o Check that the user has permission to perform the read or write operation. If not, raise a segfault and return
+    vm_segmentation *seg = find_segment(this->segmentations[pid], virtual_address);
+    if (!(seg->permissions & READ)) {
+        mmu_raise_segmentation_fault(this);
+        return;
+    }
     //o Use the page table entry’s base address and the offset of the virtual address to compute the physical address. Get a physical pointer from this address
+    void *ptr = (void*) get_system_pointer_from_pte(pte) + (virtual_address & 0xFFF);
     //o Perform the read or write operation
+    memcpy(buffer, ptr, num_bytes);
     //o Mark the PTE as accessed. If writing, also mark it as dirty.
+    pte->accessed = 1;
 }
 
 void mmu_write_to_virtual_address(mmu *this, addr32 virtual_address, size_t pid,
@@ -70,25 +93,69 @@ void mmu_write_to_virtual_address(mmu *this, addr32 virtual_address, size_t pid,
 
     //Start by following the pseudocode below:
     //o Use pid to check for a context switch. If there was a switch, flush the TLB
+    if (pid != this->curr_pid) {
+        tlb_flush(&this->tlb);
+        this->curr_pid = pid;
+    }
     //o Make sure that the address is in one of the segmentations. If not, raise a segfault and return
+    if (!address_in_segmentations(this->segmentations[pid], virtual_address)) {
+        mmu_raise_segmentation_fault(this);
+        return;
+    }
     //o Check the TLB for the page table entry. If it’s not there:
+    addr32 base_virt_addr = virtual_address & 0xFFFFF000;
+    page_table_entry *pte = tlb_get_pte(&this->tlb, base_virt_addr);
+    if (!pte) {
         //▪ Raise a TLB miss
+        mmu_tlb_miss(this);
+        
         //▪ Get the page directory entry. If it’s not present in memory:
-        //▪ Raise a page fault
-        //▪ Ask the kernel for a frame
-        //▪ Update the page directory entry’s present, read_write, and user_supervisor flags
+        uint32_t pd_idx = virtual_address >> 22;
+        page_directory* page_dir = this->page_directories[pid];
+        page_directory_entry* pde = &(page_dir->entries[pd_idx]);
+        if(!pde->present) {
+            //▪ Raise a page fault
+            mmu_raise_page_fault(this);
+            //▪ Ask the kernel for a frame
+            pde->base_addr = (ask_kernel_for_frame(NULL) >> NUM_OFFSET_BITS);
+            //▪ Update the page directory entry’s present, read_write, and user_supervisor flags
+            pde->present = true;
+            pde->read_write = true;
+            pde->user_supervisor = true;
+        }
         //▪ Get the page table using the PDE
+        page_table *page_tab = (page_table*) get_system_pointer_from_pde(pde);
         //▪ Get the page table entry from the page table. Add the entry to the TLB
+        addr32 pte_base = (virtual_address & 0x003FF000) >> NUM_OFFSET_BITS;
+        pte = &(page_tab->entries[pte_base]);
+        tlb_add_pte(&this->tlb, base_virt_addr, pte);
+    }
     //o If the page table entry is not present in memory:
+    if (!pte->present) {
         //▪ Raise a page fault
+        mmu_raise_page_fault(this);
         //▪ Ask the kernel for a frame
+        pte->base_addr = (ask_kernel_for_frame(pte) >> NUM_OFFSET_BITS);
         //▪ Update the page table entry’s present, read_write, and user_supervisor flags
+        pte->present = true;
+        pte->read_write = true;
+        pte->user_supervisor = true;
         //▪ Read the page from disk
-
+        read_page_from_disk((page_table_entry*) pte);
+    }
     //o Check that the user has permission to perform the read or write operation. If not, raise a segfault and return
+    vm_segmentation *seg = find_segment(this->segmentations[pid], virtual_address);
+    if (!(seg->permissions & WRITE)) {
+        mmu_raise_segmentation_fault(this);
+        return;
+    }
     //o Use the page table entry’s base address and the offset of the virtual address to compute the physical address. Get a physical pointer from this address
+    void *ptr = (void*) get_system_pointer_from_pte(pte) + (virtual_address & 0xFFF);
     //o Perform the read or write operation
+    memcpy(ptr, buffer, num_bytes);
     //o Mark the PTE as accessed. If writing, also mark it as dirty.
+    pte->accessed = 1;
+    pte->dirty = 1;
 }
 
 void mmu_tlb_miss(mmu *this) {
