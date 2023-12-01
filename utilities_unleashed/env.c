@@ -81,7 +81,7 @@ int main(int argc, char *argv[]) {
             while(*current != '\0') {
                 if(*current == '=')
                     equalsCount++;
-                else if(!isalpha(*current) || !isdigit(*current) || *current != '_') {
+                else if(!isalpha(*current) && !isdigit(*current) && *current != '_') {
                     print_env_usage();
                     return -1;
                 }
