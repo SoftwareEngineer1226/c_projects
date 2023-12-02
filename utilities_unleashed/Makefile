@@ -20,17 +20,6 @@ CFLAGS_DEBUG = $(CFLAGS_COMMON) -O0 -g -DDEBUG
 LD = clang
 LDFLAGS = -lm
 
-# the string in grep must appear in the hostname, otherwise the Makefile will
-# not allow the assignment to compile
-
-IS_VM=$(shell hostname | grep "cs341")
-VM_OVERRIDE=$(shell echo $$HOSTNAME)
-ifeq ($(IS_VM),)
-ifneq ($(VM_OVERRIDE),cs241grader)
-$(error This assignment must be compiled on the CS341 VMs)
-endif
-endif
-
 .PHONY: all
 all: release
 
