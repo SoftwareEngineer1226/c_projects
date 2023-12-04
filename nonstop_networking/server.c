@@ -56,7 +56,8 @@ enum {
     STATE_WRITING = 3001,
     STATE_READING_HEADER,
     STATE_SENDING_GET,
-    STATE_READING_PUT,
+    STATE_READING_PUT_SIZE,
+    STATE_READING_PUT_DATA,
     STATE_WRITING_LIST,
     STATE_INTERNAL_ERROR,
     STATE_DONE
@@ -66,7 +67,7 @@ enum {
 typedef struct {
     Stream stream;          // Used to buffer both input and output from the stream. Please note we do not read and write at the same time. Always read, then write
     int state;                // Current state of the session -- what is it doing/
-    char input[BUFSIZ];     // When reading the header, it is loaded in here.
+    char input[BUFSIZ*2];     // When reading the header, it is loaded in here.
     char filename[BUFSIZ];  // Filename for command
     size_t inputPos;        // When reading the header this is the next position to put the next character
     FILE* fd;                // For file based operations, GET and PUT this is the file we are reading or writing
@@ -77,6 +78,8 @@ typedef struct {
     size_t listDataPos;        // When writing out list data in multiple buffer writes, this is position we have already writeen up to
     bool reading;           // IS this session currently reading from the socket or writing to it
 
+    size_t headersize;
+
     size_t totalBytesForPut;
     size_t totalWritten;
 } Session;
@@ -84,7 +87,7 @@ typedef struct {
 static char base_temp_dir[BUFSIZ];
 static vector* directory = NULL;
 static my_hash_table_t sock_to_session_hashtable;
-static int verbose_flag = 0;
+static int verbose_flag = 1;
 
 // Flush the rest of the write buffer to the socket, and clear it out, however, don't block. This can return STREAM_END, STREAM_PENDING, STREAM_ERROR or STREAM_OK
 int Stream_Send(Stream* stream);
@@ -114,9 +117,6 @@ void write_all(FILE* f, char* buffer, size_t size);
 int remove_directory(const char *path);
 int set_sighandler(sighandler_t sig_usr);
 int exist_in_vector(vector* vector, char *filename);
-
-void print_nonexistent_verb();
-void print_Malformed_verb();
 
 typedef void (*sighandler_t) (int);
 
@@ -234,22 +234,29 @@ int remove_directory(const char *path) {
    return r;
 }
 
-void print_nonexistent_verb() {
-    printf("Unknown request\n");
-}
-
-void print_Malformed_verb() {
-    printf("Malformed request\n");
-}
-
-static void send_malformed_response(Session *session)
+static void send_header_response(Session *session, char *msgcode, const char *msg)
 {
-    print_Malformed_verb();
+    if(msgcode == NULL)
+        return;
+
+    LOG("Writing header for response %s", msgcode);
+
     char errmsg[BUFSIZ];
-    sprintf(errmsg, "ERROR\nMarlformed Request\n");
-    send_all(errmsg, strlen(errmsg), session->stream.socket);
-    session->state = STATE_DONE;
-    session->status = STATUS_SESSION_ERROR;
+    if(msg != NULL) {
+        sprintf(errmsg, "%s\n%s\n", msgcode, msg);
+        send_all(errmsg, strlen(errmsg), session->stream.socket);
+    } else {
+        sprintf(errmsg, "%s\n", msgcode);
+        send_all(errmsg, strlen(errmsg), session->stream.socket);
+    }
+    
+    if( !strcmp(msgcode, "OK") ) {
+        session->state = STATE_DONE;
+        session->status = STATUS_SESSION_END;
+    } else {
+        session->state = STATE_DONE;
+        session->status = STATUS_SESSION_ERROR;
+    }
 }
 
 bool TryParse(Session* session, char* cmd, bool hasFilename) {
@@ -260,19 +267,23 @@ bool TryParse(Session* session, char* cmd, bool hasFilename) {
 
     if(hasFilename) {
         if(session->input[cmdLen] != ' ') {
-            send_malformed_response(session);
+            fprintf(stderr, "Did not find newline at end of header\n");
+            send_header_response(session, "ERROR", err_bad_request);
             return false;
         }
         char* nl = strchr(session->input, '\n');
         if(nl == NULL) {
-            send_malformed_response(session);
+            fprintf(stderr, "Did not find newline at end of header\n");
+            send_header_response(session, "ERROR", err_bad_request);
             return false;
         }
         char* filenameStart = &session->input[cmdLen+1];
         strncpy(session->filename, filenameStart, nl - filenameStart);
         session->filename[nl - filenameStart] = '\0';
-        if(strlen(session->filename) == 0) {
-            send_malformed_response(session);
+    } else {
+        if(session->input[cmdLen] != '\n') {
+            fprintf(stderr, "Did not find newline at end of header\n");
+            send_header_response(session, "ERROR", err_bad_request);
             return false;
         }
     }
@@ -316,41 +327,82 @@ bool continue_reading_header(Session* session) {
             err = 1;
 
         if(err) {
-            print_nonexistent_verb();
-            char errmsg[BUFSIZ];
-            sprintf(errmsg, "ERROR\nUnknown Request\n");
-            send_all(errmsg, strlen(errmsg), session->stream.socket);
-            session->state = STATE_DONE;
-            session->status = STATUS_SESSION_ERROR;
+            fprintf(stderr, "Unknown Request\n");
+            send_header_response(session, "ERROR", err_bad_request);
             return false;
         }
     }
     return false;//Session_has_more(&session->stream);
 }
 
-static void sending_put_response(Session* session, char *msg)
+static void sending_put_response(Session* session, char *msgcode, const char *msg)
 {
-    int exist = exist_in_vector(directory, session->filename);
     fclose(session->fd);
-    send_all(msg, strlen(msg), session->stream.socket);
-    session->state = STATE_DONE;
-    session->status = STATUS_SESSION_END;
-    if(!exist) {
-        vector_push_back(directory, strdup(session->filename));
+    send_header_response(session, msgcode, msg);
+    int exist = exist_in_vector(directory, session->filename);
+
+    if( !strcmp(msgcode, "OK") ) {
+        if(!exist) {
+            vector_push_back(directory, strdup(session->filename));
+        }
+    } else {
+        char fullpath[BUFSIZ];
+        snprintf(fullpath, sizeof(fullpath), "%s/%s", base_temp_dir, session->filename);
+        unlink(fullpath);
+        if(exist) {
+            for(size_t i=0; i < vector_size(directory); i++) {
+                char *diritem = vector_get(directory, i);
+                if( !strcmp(session->filename, diritem) ) {
+                    snprintf(fullpath, sizeof(fullpath), "%s/%s", base_temp_dir, session->filename);
+                    free(diritem);
+                    vector_erase(directory, i); 
+                    break;
+                }
+            }
+        }
     }
 }
 
 bool continue_reading_put(Session* session)
 {
-    write_all(session->fd, session->stream.buffer, session->stream.bytesInBuffer);
-    session->totalWritten += session->stream.bytesInBuffer;
-
-    if(session->totalWritten > session->totalBytesForPut) { // for short content
-        sending_put_response(session, "ERROR\nReceived too mush data\n");
-        print_received_too_much_data();
-        session->state = STATE_DONE;
+    if(session->state == STATE_READING_PUT_SIZE) {
+        do
+        {
+            int c = Stream_GetNext(&session->stream);
+            if(c == STREAM_END) {
+                break;
+            }
+            session->input[session->inputPos++] = c;
+            
+        } while(1);
+        
+        if(session->inputPos >= session->headersize + 8) {
+            char buffer[BUFSIZ] = "";
+            memcpy(&session->totalBytesForPut, &session->input[session->headersize], sizeof(size_t));
+            
+            LOG("PUT requested for '%s' with file size %zu bytes", session->filename, session->totalBytesForPut);
+            LOG("Reading binary data from request");
+    
+            snprintf(buffer, sizeof(buffer), "%s/%s", base_temp_dir, session->filename);
+            session->fd = fopen(buffer, "wb");
+            if(session->fd == NULL) {
+                fprintf(stderr, "%s\n", strerror(errno));
+                send_header_response(session, "ERROR", "An internal error ocurred");
+                return false;
+            }
+    
+            size_t nowWritingBytes = session->inputPos - session->headersize - 8;
+            if(nowWritingBytes > 0) {
+                write_all(session->fd, &session->input[session->headersize + 8], nowWritingBytes);
+                session->totalWritten = nowWritingBytes;
+            }
+            session->state = STATE_READING_PUT_DATA;
+        }
     }
-
+    else {
+        write_all(session->fd, session->stream.buffer, session->stream.bytesInBuffer);
+        session->totalWritten += session->stream.bytesInBuffer;
+    }
     return false;
 }
 
@@ -389,25 +441,29 @@ int Stream_WriteNext(Stream* stream, char c) {
 static int sending_get_response(Session* session) {
     char *filename = session->filename;
     int sock = session->stream.socket;
-    
-    LOG("Server get for %s\n", filename);
+    LOG("Get requested for '%s'", filename);
     char buffer[BUFSIZ];
+    if(strlen(session->filename) == 0) {
+        fprintf(stderr, "Requested file not found\n");
+        send_header_response(session, "ERROR", err_no_such_file);
+        return false;
+    }
     snprintf(buffer, sizeof(buffer), "%s/%s", base_temp_dir, filename);
     struct stat file_info;
     stat(buffer, &file_info);
     FILE* f = fopen(buffer, "rb");
     if(f == NULL) {
-        sprintf(buffer, "ERROR\nUnknown file\n");
-        send_all(buffer, strlen(buffer), sock);
-        session->state = STATE_INTERNAL_ERROR;
-        session->status = STATUS_SESSION_ERROR;
+        fprintf(stderr, "Requested file not found\n");
+        send_header_response(session, "ERROR", err_no_such_file);
         return -1;
     }
     // Set up the header
+    LOG("Writing header for response OK");
     strcpy(buffer, "OK\n12345678"); // Note we will overwrite 12345678 with a size_t
     char *pBuffer = buffer + strlen(buffer);
     insert_size_into_mem(&buffer[3], file_info.st_size);
     send_all(buffer, pBuffer - buffer, sock);
+    LOG("Writing payload for response OK");
     size_t bytes_read = 0;
     do
     {
@@ -434,30 +490,23 @@ void session_start_delete(Session *session)
 {
     int result = 0;
     char fullpath[BUFSIZ] = "";
-
-    if(strlen(session->filename)) {
-        for(size_t i=0; i < vector_size(directory); i++) {
-            char *diritem = vector_get(directory, i);
-            if( !strcmp(session->filename, diritem) ) {
-                snprintf(fullpath, sizeof(fullpath), "%s/%s", base_temp_dir, session->filename);
-                free(diritem);
-                vector_erase(directory, i); 
-                break;
-            }
-        }
-        
-        char buffer[BUFSIZ] = "";
-        result = unlink(fullpath);
-        if(result == 0) {
-            sprintf(buffer, "OK\n");
-            send_all(buffer, strlen(buffer), session->stream.socket);
-        } else {
-            sprintf(buffer, "ERROR\n%s\n", strerror(errno));
-            send_all(buffer, strlen(buffer), session->stream.socket);
+    
+    for(size_t i=0; i < vector_size(directory); i++) {
+        char *diritem = vector_get(directory, i);
+        if( !strcmp(session->filename, diritem) ) {
+            snprintf(fullpath, sizeof(fullpath), "%s/%s", base_temp_dir, session->filename);
+            free(diritem);
+            vector_erase(directory, i); 
+            break;
         }
     }
-    session->state = STATE_DONE;
-    session->status = STATUS_SESSION_END;
+    
+    result = unlink(fullpath);
+    if(result == 0) {
+        send_header_response(session, "OK", NULL);
+    } else {
+        send_header_response(session, "ERROR", err_no_such_file);
+    }
 }
 
 void session_start_list(Session *session)
@@ -488,10 +537,12 @@ void session_start_list(Session *session)
     });
 
     // Set up the header
+    LOG("Writing header for response OK");
     strcpy(buffer, "OK\n12345678"); // Note we will overwrite 12345678 with a size_t
     char *pBuffer = buffer + strlen(buffer);
     insert_size_into_mem(&buffer[3], sizeCount);
     send_all(buffer, pBuffer - buffer, session->stream.socket);
+    LOG("Writing payload for response OK");
     send_all(session->listData, sizeCount, session->stream.socket);
     free(session->listData);
     session->listData = NULL;
@@ -502,49 +553,16 @@ void session_start_list(Session *session)
 }
 
 void session_start_get(Session* session) {
-    if(strlen(session->filename)) {
-        sending_get_response(session);
-        session->state = STATE_SENDING_GET;
-    }
+    sending_get_response(session);
+    session->state = STATE_SENDING_GET;
 }
 
 void session_start_put(Session* session, size_t cmdLen) {
 
-    if(strlen(session->filename)) { // got filename, but didn't get filesize
-        LOG("Server put for %s\n", session->filename);
-        
-        size_t head_size = cmdLen + strlen(session->filename) + 2; // "PUT abc.png\n"
-    
-        if(session->inputPos >= head_size + 8) {
-            char buffer[BUFSIZ] = "";
-            snprintf(buffer, sizeof(buffer), "%s/%s", base_temp_dir, session->filename);
-            session->fd = fopen(buffer, "wb");
-            if(session->fd == NULL) {
-                sprintf(buffer, "ERROR\n%s\n", strerror(errno));
-                send_all(buffer, strlen(buffer), session->stream.socket);
-                session->state = STATE_INTERNAL_ERROR;
-                session->status = STATUS_SESSION_ERROR;
-                return;
-            }
-            
-            memcpy(&session->totalBytesForPut, &session->input[head_size], sizeof(size_t));
-
-            size_t nowWritingBytes = session->inputPos - head_size - 8;
-            if(nowWritingBytes > 0) {
-                write_all(session->fd, &session->input[head_size + 8], nowWritingBytes);
-                session->totalWritten = nowWritingBytes;
-            }
-
-            if(session->totalWritten == session->totalBytesForPut) { // for short content
-                sending_put_response(session, "OK\n");
-            } else if(session->totalWritten > session->totalBytesForPut) { // for short content
-                sending_put_response(session, "ERROR\nReceived too mush data\n");
-            } else {
-                session->state = STATE_READING_PUT;
-            }
-        } 
-
-    }
+    size_t head_size = cmdLen + strlen(session->filename) + 2; // 2 for (' ' and '\n') in "PUT file.png\n"
+    session->headersize = head_size;
+    session->state = STATE_READING_PUT_SIZE;
+    continue_reading_put(session);
 }
 
 Session* Session_create(int sock) {
@@ -564,6 +582,7 @@ Session* Session_create(int sock) {
     session->listData = NULL;
     session->listDataPos = 0;
     session->reading = true;
+    session->headersize = 0;
     return session;
 }
 
@@ -581,7 +600,8 @@ int Session_processNext(Session* session) {
             case STATE_SENDING_GET: 
                 //running = continue_sending_get(session);
                 break;
-            case STATE_READING_PUT:
+            case STATE_READING_PUT_SIZE:
+            case STATE_READING_PUT_DATA:
                 running = continue_reading_put(session);
                 break;
             case STATE_WRITING_LIST:
@@ -737,8 +757,8 @@ static int parse_args(int argc, char* argv[])
 
     char* arg = argv[i];
 
-    if(!strcmp(arg, "--verbose")) {
-        verbose_flag = 1;
+    if(!strcmp(arg, "--noverbose")) {
+        verbose_flag = 0;
     } else {
       	fprintf(stderr, "%s: unknown parameter '%s'\n",argv[0],arg);
       print_usage(argv[0]);
@@ -750,9 +770,6 @@ static int parse_args(int argc, char* argv[])
 
 static void end_session(int sock)
 {
-    LOG ("Closed connection on descriptor %d\n",
-            sock);
-
     close (sock);
 
     uint32_t keyP = sock;
@@ -866,8 +883,7 @@ int main(int argc, char **argv) {
                                      sbuf, sizeof sbuf,
                                      NI_NUMERICHOST | NI_NUMERICSERV);
                     if (s == 0) {
-                      LOG("Accepted connection on descriptor %d "
-                             "(host=%s, port=%s)\n", infd, hbuf, sbuf);
+                      LOG("Accepted new connection (fd=%d, %s:%s)", infd, hbuf, sbuf);
                     }
 
                     /* Make the incoming socket non-blocking and add it to the
@@ -941,21 +957,29 @@ int main(int argc, char **argv) {
                         }*/
                         
                     }
-                    
-                    if(session && session->state == STATE_READING_PUT && done) {
-                        if(session->totalWritten < session->totalBytesForPut) {
-                            sending_put_response(session, "ERROR\nReceived too little data\n");
-                            print_too_little_data();
-                            session->state = STATE_DONE;
-                        } else if(session->totalWritten == session->totalBytesForPut) {
-                            sending_put_response(session, "OK\n");
-                            session->state = STATE_DONE;
+
+                    if(session && session->state == STATE_READING_PUT_SIZE && done) {
+                        if(session->headersize == 0 || session->inputPos < session->headersize + 8) {
+                            fprintf(stderr, "File size was not a size_t\n");
+                            send_header_response(session, "ERROR", err_bad_request);
                         }
+                        LOG("Connection closed by client (fd=%d)", events[i].data.fd);
                         end_session(events[i].data.fd);
-                    } else if (session && session->state != STATE_SENDING_GET && done)
+                    } else if(session && session->state == STATE_READING_PUT_DATA && done) {
+                        if(session->totalWritten < session->totalBytesForPut) {
+                            print_too_little_data();
+                            sending_put_response(session, "ERROR", err_bad_file_size);
+                        } else if(session->totalWritten == session->totalBytesForPut) {
+                            sending_put_response(session, "OK", NULL);
+                        } else if(session->totalWritten > session->totalBytesForPut) {
+                            print_received_too_much_data();
+                            sending_put_response(session, "ERROR", err_bad_file_size);
+                        }
+                        LOG("Connection closed by client (fd=%d)", events[i].data.fd);
+                        end_session(events[i].data.fd);
+                    } else if (session && done)
                     {
-                        end_session(events[i].data.fd);
-                    } else if(session && (session->status == STATUS_SESSION_END || session->status == STATUS_SESSION_ERROR)) {
+                        LOG("Connection closed by client (fd=%d)", events[i].data.fd);
                         end_session(events[i].data.fd);
                     }
                         

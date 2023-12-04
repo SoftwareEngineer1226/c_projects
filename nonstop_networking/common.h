@@ -14,7 +14,7 @@
             fprintf(stderr, "\n");        \
         } while (0);
 
-#define MAX_BUF_SIZE 1024
+#define MAX_BUF_SIZE 2048
 
 #define HASH_TABLE_SIZE           10000
 
