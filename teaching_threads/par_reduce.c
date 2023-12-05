@@ -11,24 +11,22 @@
 /* You might need a struct for each task ... */
 typedef struct par_reduce_param {
     int* pList;
-    int* result;
     int length;
     int baseCase;
-    int threadNum;
     reducer fn;
 } par_reduce_param;
 
 void* reduce_with_param(void* pVoidArg) {
     par_reduce_param* pArg = (par_reduce_param*) pVoidArg;
-    int result = reduce(pArg->pList, pArg->length, pArg->fn, pArg->baseCase);
-    *(pArg->result) = result;
-    return NULL;
+    int *result = malloc(sizeof(int));
+    *result = reduce(pArg->pList, pArg->length, pArg->fn, pArg->baseCase);
+    return (void*)result;
 }
 
 int par_reduce(int *list, size_t list_len, reducer reduce_func, int base_case,
                size_t num_threads) {
-    if (list_len > num_threads) {
-        num_threads = list_len;
+    if (num_threads >= list_len) {
+        return reduce(list, list_len, reduce_func, base_case);
     }
     size_t items_per_thread = list_len / num_threads;
     size_t last_thread = list_len - (num_threads-1) * items_per_thread;
@@ -42,8 +40,6 @@ int par_reduce(int *list, size_t list_len, reducer reduce_func, int base_case,
         pParam->pList = &list[thread_num*items_per_thread];
         pParam->fn = reduce_func;
         pParam->baseCase = base_case;
-        pParam->result = &result[thread_num];
-        pParam->threadNum = thread_num;
         if(thread_num == num_threads - 1) {
             pParam->length = last_thread;
         } else {
@@ -53,7 +49,10 @@ int par_reduce(int *list, size_t list_len, reducer reduce_func, int base_case,
     }
 
     for(size_t thread_num = 0; thread_num < num_threads; thread_num++) {
-        pthread_join(threads[thread_num], NULL);
+        void *retval = NULL;
+        pthread_join(threads[thread_num], &retval);
+        result[thread_num] = *((int *)retval);
+        free(retval);
     }
 
     int final = reduce(result, num_threads, reduce_func, base_case);
