@@ -122,15 +122,7 @@ typedef void (*sighandler_t) (int);
 
 static void print_usage(const char* progname)
 {
-  fprintf(stderr, 
-      "Usage: %s <port>\n"
-      "\n"
-      "where <options>: \n"
-      " -verbose : output log\n"
-      "\n"
-      ,
-      progname
-      );
+  fprintf(stderr, "Usage: %s <port>\n", progname);
 }
 
 static void sig_usr_un(int signo)
